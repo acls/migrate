@@ -1,6 +1,6 @@
 // Package main is the CLI.
 // You can use the CLI via Terminal.
-// import "github.com/mattes/migrate/migrate" for usage within Go.
+// import "github.com/acls/migrate/migrate" for usage within Go.
 package main
 
 import (
@@ -10,16 +10,16 @@ import (
 	"strconv"
 	"time"
 
+	_ "github.com/acls/migrate/driver/bash"
+	_ "github.com/acls/migrate/driver/cassandra"
+	_ "github.com/acls/migrate/driver/mysql"
+	_ "github.com/acls/migrate/driver/postgres"
+	_ "github.com/acls/migrate/driver/sqlite3"
+	"github.com/acls/migrate/file"
+	"github.com/acls/migrate/migrate"
+	"github.com/acls/migrate/migrate/direction"
+	pipep "github.com/acls/migrate/pipe"
 	"github.com/fatih/color"
-	_ "github.com/mattes/migrate/driver/bash"
-	_ "github.com/mattes/migrate/driver/cassandra"
-	_ "github.com/mattes/migrate/driver/mysql"
-	_ "github.com/mattes/migrate/driver/postgres"
-	_ "github.com/mattes/migrate/driver/sqlite3"
-	"github.com/mattes/migrate/file"
-	"github.com/mattes/migrate/migrate"
-	"github.com/mattes/migrate/migrate/direction"
-	pipep "github.com/mattes/migrate/pipe"
 )
 
 var url = flag.String("url", os.Getenv("MIGRATE_URL"), "")

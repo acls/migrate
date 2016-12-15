@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/acls/migrate/driver"
+	"github.com/acls/migrate/file"
+	"github.com/acls/migrate/migrate/direction"
 	"github.com/lib/pq"
-	"github.com/mattes/migrate/driver"
-	"github.com/mattes/migrate/file"
-	"github.com/mattes/migrate/migrate/direction"
 )
 
 type Driver struct {
