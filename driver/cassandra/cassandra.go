@@ -2,6 +2,7 @@
 package cassandra
 
 import (
+	"database/sql"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -123,23 +124,31 @@ func (driver *Driver) version(d direction.Direction, invert bool) error {
 	if invert {
 		stmt = !stmt
 	}
+
 	return driver.session.Query(stmt.String(), versionRow).Exec()
 }
 
-func (driver *Driver) Migrate(f file.File, pipe chan interface{}) {
+func (driver *Driver) Begin() (driver.Tx, error) {
+	startVersion, err := driver.Version()
+	if err != nil {
+		return nil, err
+	}
+	return &cassandraTx{driver.session, startVersion}, nil
+}
+
+func (driver *Driver) Migrate(tx driver.Tx, f file.File, pipe chan interface{}) {
 	var err error
 	defer func() {
 		if err != nil {
-			// Invert version direction if we couldn't apply the changes for some reason.
-			if err := driver.version(f.Direction, true); err != nil {
+			pipe <- err
+			if err := tx.Rollback(); err != nil {
 				pipe <- err
 			}
-			pipe <- err
 		}
 		close(pipe)
 	}()
-
 	pipe <- f
+
 	if err = driver.version(f.Direction, false); err != nil {
 		return
 	}
@@ -148,24 +157,78 @@ func (driver *Driver) Migrate(f file.File, pipe chan interface{}) {
 		return
 	}
 
-	for _, query := range strings.Split(string(f.Content), ";") {
+	if _, err = tx.Exec(string(f.Content)); err != nil {
+		return
+	}
+
+	if err = tx.Commit(); err != nil {
+		return
+	}
+}
+
+func (driver *Driver) Version() (uint64, error) {
+	return getVersion(driver.session)
+}
+
+func init() {
+	driver.RegisterDriver("cassandra", &Driver{})
+}
+
+type cassandraTx struct {
+	session      *gocql.Session
+	startVersion uint64
+}
+
+func (tx *cassandraTx) Exec(query string, args ...interface{}) (sql.Result, error) {
+	for _, query := range strings.Split(query, ";") {
 		query = strings.TrimSpace(query)
 		if len(query) == 0 {
 			continue
 		}
 
-		if err = driver.session.Query(query).Exec(); err != nil {
-			return
+		if err := tx.session.Query(query, args...).Exec(); err != nil {
+			return nil, err
 		}
 	}
+	return cassandraResult{}, nil
+}
+func (tx *cassandraTx) Rollback() error {
+	return setVersion(tx.session, tx.startVersion)
+}
+func (tx *cassandraTx) Commit() error {
+	return nil
 }
 
-func (driver *Driver) Version() (uint64, error) {
+func getVersion(session *gocql.Session) (uint64, error) {
 	var version int64
-	err := driver.session.Query("SELECT version FROM "+tableName+" WHERE versionRow = ?", versionRow).Scan(&version)
+	err := session.Query("SELECT version FROM "+tableName+" WHERE versionRow = ?", versionRow).Scan(&version)
 	return uint64(version) - 1, err
 }
+func setVersion(session *gocql.Session, version uint64) error {
+	currVersion, err := getVersion(session)
+	if err != nil {
+		return err
+	}
 
-func init() {
-	driver.RegisterDriver("cassandra", &Driver{})
+	var (
+		sign  string
+		delta uint64
+	)
+	if currVersion < version {
+		sign = "+"
+		delta = version - currVersion
+	} else {
+		sign = "-"
+		delta = currVersion - version
+	}
+	return session.Query("UPDATE "+tableName+" SET version = version "+sign+" ? where versionRow = ?", delta, versionRow).Exec()
+}
+
+type cassandraResult struct{}
+
+func (r cassandraResult) LastInsertId() (int64, error) {
+	return 0, nil
+}
+func (r cassandraResult) RowsAffected() (int64, error) {
+	return 0, nil
 }

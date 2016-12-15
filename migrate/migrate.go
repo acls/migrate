@@ -14,6 +14,7 @@ import (
 	"github.com/acls/migrate/driver"
 	"github.com/acls/migrate/file"
 	"github.com/acls/migrate/migrate/direction"
+	"github.com/acls/migrate/migrate/txtype"
 	pipep "github.com/acls/migrate/pipe"
 )
 
@@ -34,26 +35,7 @@ func Up(pipe chan interface{}, url, migrationsPath string) {
 		return
 	}
 
-	if len(applyMigrationFiles) > 0 {
-		for _, f := range applyMigrationFiles {
-			pipe1 := pipep.New()
-			go d.Migrate(f, pipe1)
-			if ok := pipep.WaitAndRedirect(pipe1, pipe, handleInterrupts()); !ok {
-				break
-			}
-		}
-		if err := d.Close(); err != nil {
-			pipe <- err
-		}
-		go pipep.Close(pipe, nil)
-		return
-	} else {
-		if err := d.Close(); err != nil {
-			pipe <- err
-		}
-		go pipep.Close(pipe, nil)
-		return
-	}
+	MigrateFiles(pipe, d, applyMigrationFiles)
 }
 
 // UpSync is synchronous version of Up
@@ -81,26 +63,7 @@ func Down(pipe chan interface{}, url, migrationsPath string) {
 		return
 	}
 
-	if len(applyMigrationFiles) > 0 {
-		for _, f := range applyMigrationFiles {
-			pipe1 := pipep.New()
-			go d.Migrate(f, pipe1)
-			if ok := pipep.WaitAndRedirect(pipe1, pipe, handleInterrupts()); !ok {
-				break
-			}
-		}
-		if err2 := d.Close(); err2 != nil {
-			pipe <- err2
-		}
-		go pipep.Close(pipe, nil)
-		return
-	} else {
-		if err2 := d.Close(); err2 != nil {
-			pipe <- err2
-		}
-		go pipep.Close(pipe, nil)
-		return
-	}
+	MigrateFiles(pipe, d, applyMigrationFiles)
 }
 
 // DownSync is synchronous version of Down
@@ -168,25 +131,11 @@ func Migrate(pipe chan interface{}, url, migrationsPath string, relativeN int) {
 		return
 	}
 
-	if len(applyMigrationFiles) > 0 && relativeN != 0 {
-		for _, f := range applyMigrationFiles {
-			pipe1 := pipep.New()
-			go d.Migrate(f, pipe1)
-			if ok := pipep.WaitAndRedirect(pipe1, pipe, handleInterrupts()); !ok {
-				break
-			}
-		}
-		if err2 := d.Close(); err2 != nil {
-			pipe <- err2
-		}
-		go pipep.Close(pipe, nil)
-		return
+	if relativeN == 0 {
+		applyMigrationFiles = nil
 	}
-	if err2 := d.Close(); err2 != nil {
-		pipe <- err2
-	}
-	go pipep.Close(pipe, nil)
-	return
+
+	MigrateFiles(pipe, d, applyMigrationFiles)
 }
 
 // MigrateSync is synchronous version of Migrate
@@ -261,6 +210,39 @@ func Create(url, migrationsPath, name string) (*file.MigrationFile, error) {
 	return mfile, nil
 }
 
+// MigrateFiles applies migrations in given files
+func MigrateFiles(pipe chan interface{}, d driver.Driver, applyMigrationFiles []file.File) {
+	if len(applyMigrationFiles) > 0 {
+		t := &transaction{d: d, typ: txType}
+		for _, f := range applyMigrationFiles {
+			tx, err := t.Begin()
+			if err != nil {
+				go pipep.Close(pipe, err)
+				return
+			}
+
+			pipe1 := pipep.New()
+			go d.Migrate(tx, f, pipe1)
+			if ok := pipep.WaitAndRedirect(pipe1, pipe, handleInterrupts()); !ok {
+				break
+			}
+		}
+		if err := t.CommitAll(); err != nil {
+			pipe <- err
+		}
+		if err := d.Close(); err != nil {
+			pipe <- err
+		}
+		go pipep.Close(pipe, nil)
+		return
+	}
+
+	if err := d.Close(); err != nil {
+		pipe <- err
+	}
+	go pipep.Close(pipe, nil)
+}
+
 // initDriverAndReadMigrationFilesAndGetVersion is a small helper
 // function that is common to most of the migration funcs
 func initDriverAndReadMigrationFilesAndGetVersion(url, migrationsPath string) (driver.Driver, *file.MigrationFiles, uint64, error) {
@@ -314,4 +296,17 @@ func handleInterrupts() chan os.Signal {
 		return c
 	}
 	return nil
+}
+
+// txType is an internal variable that holds the transaction type
+var txType = txtype.TxPerFile
+
+// SingleTransaction asdf
+func SingleTransaction() {
+	txType = txtype.TxSingle
+}
+
+// PerFileTransaction asdf
+func PerFileTransaction() {
+	txType = txtype.TxPerFile
 }

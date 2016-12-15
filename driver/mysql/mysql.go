@@ -65,17 +65,16 @@ func (driver *Driver) FilenameExtension() string {
 	return "sql"
 }
 
-func (driver *Driver) Migrate(f file.File, pipe chan interface{}) {
+func (driver *Driver) Begin() (driver.Tx, error) {
+	return driver.db.Begin()
+}
+
+func (driver *Driver) Migrate(tx driver.Tx, f file.File, pipe chan interface{}) {
 	defer close(pipe)
 	pipe <- f
 
 	// http://go-database-sql.org/modifying.html, Working with Transactions
 	// You should not mingle the use of transaction-related functions such as Begin() and Commit() with SQL statements such as BEGIN and COMMIT in your SQL code.
-	tx, err := driver.db.Begin()
-	if err != nil {
-		pipe <- err
-		return
-	}
 
 	if f.Direction == direction.Up {
 		if _, err := tx.Exec("INSERT INTO "+tableName+" (version) VALUES (?)", f.Version); err != nil {

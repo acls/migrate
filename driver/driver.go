@@ -2,11 +2,19 @@
 package driver
 
 import (
+	"database/sql"
 	"fmt"
 	neturl "net/url" // alias to allow `url string` func signature in New
 
 	"github.com/acls/migrate/file"
 )
+
+// Tx interface
+type Tx interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	Rollback() error
+	Commit() error
+}
 
 // Driver is the interface type that needs to implemented by all drivers.
 type Driver interface {
@@ -24,11 +32,14 @@ type Driver interface {
 	// The returned string must not begin with a dot.
 	FilenameExtension() string
 
+	// Begin returns a new driver transaction
+	Begin() (Tx, error)
+
 	// Migrate is the heart of the driver.
 	// It will receive a file which the driver should apply
 	// to its backend or whatever. The migration function should use
 	// the pipe channel to return any errors or other useful information.
-	Migrate(file file.File, pipe chan interface{})
+	Migrate(tx Tx, file file.File, pipe chan interface{})
 
 	// Version returns the current migration version.
 	Version() (uint64, error)
