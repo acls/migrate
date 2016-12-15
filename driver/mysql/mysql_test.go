@@ -52,7 +52,7 @@ func TestMigrate(t *testing.T) {
 		},
 		{
 			Path:      "/foobar",
-			FileName:  "002_foobar.down.sql",
+			FileName:  "001_foobar.down.sql",
 			Version:   1,
 			Name:      "foobar",
 			Direction: direction.Down,
@@ -77,21 +77,33 @@ func TestMigrate(t *testing.T) {
 	}
 
 	pipe := pipep.New()
-	go d.Migrate(files[0], pipe)
+	tx, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go d.Migrate(tx, files[0], pipe)
 	errs := pipep.ReadErrors(pipe)
 	if len(errs) > 0 {
 		t.Fatal(errs)
 	}
 
 	pipe = pipep.New()
-	go d.Migrate(files[1], pipe)
+	tx, err = d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go d.Migrate(tx, files[1], pipe)
 	errs = pipep.ReadErrors(pipe)
 	if len(errs) > 0 {
 		t.Fatal(errs)
 	}
 
 	pipe = pipep.New()
-	go d.Migrate(files[2], pipe)
+	tx, err = d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go d.Migrate(tx, files[2], pipe)
 	errs = pipep.ReadErrors(pipe)
 	if len(errs) == 0 {
 		t.Error("Expected test case to fail")
