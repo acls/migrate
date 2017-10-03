@@ -10,11 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	_ "github.com/acls/migrate/driver/bash"
-	_ "github.com/acls/migrate/driver/cassandra"
-	_ "github.com/acls/migrate/driver/mysql"
-	_ "github.com/acls/migrate/driver/postgres"
-	_ "github.com/acls/migrate/driver/sqlite3"
+	_ "github.com/acls/migrate/driver/pgx"
 	"github.com/acls/migrate/file"
 	"github.com/acls/migrate/migrate"
 	"github.com/acls/migrate/migrate/direction"

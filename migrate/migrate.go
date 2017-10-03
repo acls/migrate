@@ -156,7 +156,7 @@ func Version(url, migrationsPath string) (version uint64, err error) {
 }
 
 // Create creates new migration files on disk
-func Create(url, migrationsPath, name string) (*file.MigrationFile, error) {
+func Create(url, migrationsPath, name string, contents ...string) (*file.MigrationFile, error) {
 	d, err := driver.New(url)
 	if err != nil {
 		return nil, err
@@ -182,20 +182,29 @@ func Create(url, migrationsPath, name string) (*file.MigrationFile, error) {
 	filenamef := "%s_%s.%s.%s"
 	name = strings.Replace(name, " ", "_", -1)
 
+	var upContent string
+	if len(contents) > 0 {
+		upContent = contents[0]
+	}
+	var downContent string
+	if len(contents) > 1 {
+		downContent = contents[1]
+	}
+
 	mfile := &file.MigrationFile{
 		Version: version,
 		UpFile: &file.File{
 			Path:      migrationsPath,
 			FileName:  fmt.Sprintf(filenamef, versionStr, name, "up", d.FilenameExtension()),
 			Name:      name,
-			Content:   []byte(""),
+			Content:   []byte(upContent),
 			Direction: direction.Up,
 		},
 		DownFile: &file.File{
 			Path:      migrationsPath,
 			FileName:  fmt.Sprintf(filenamef, versionStr, name, "down", d.FilenameExtension()),
 			Name:      name,
-			Content:   []byte(""),
+			Content:   []byte(downContent),
 			Direction: direction.Down,
 		},
 	}

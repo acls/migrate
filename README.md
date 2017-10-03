@@ -21,11 +21,7 @@ __Features__
 
 ## Available Drivers
 
- * [PostgreSQL](https://github.com/acls/migrate/tree/master/driver/postgres)
- * [Cassandra](https://github.com/acls/migrate/tree/master/driver/cassandra)
- * [SQLite](https://github.com/acls/migrate/tree/master/driver/sqlite3)
- * [MySQL](https://github.com/acls/migrate/tree/master/driver/mysql) ([experimental](https://github.com/acls/migrate/issues/1#issuecomment-58728186))
- * Bash (planned)
+ * [PostgreSQL](https://github.com/acls/migrate/tree/master/driver/pgx)
 
 Need another driver? Just implement the [Driver interface](http://godoc.org/github.com/acls/migrate/driver#Driver) and open a PR.
 
@@ -79,7 +75,7 @@ See GoDoc here: http://godoc.org/github.com/acls/migrate/migrate
 import "github.com/acls/migrate/migrate"
 
 // Import any required drivers so that they are registered and available
-import _ "github.com/acls/migrate/driver/mysql"
+import _ "github.com/acls/migrate/driver/pgx"
 
 // use synchronous versions of migration functions ...
 allErrors, ok := migrate.UpSync("driver://url", "./path")

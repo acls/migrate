@@ -2,18 +2,17 @@
 package pgx
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/acls/migrate/driver"
 	"github.com/acls/migrate/file"
 	"github.com/acls/migrate/migrate/direction"
 	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/stdlib"
 )
 
 type Driver struct {
-	db        *sql.DB
+	// db        *sql.DB
+	pool      *pgx.ConnPool
 	tableName string
 }
 
@@ -30,26 +29,25 @@ func New(tableName string) *Driver {
 }
 
 func (driver *Driver) InitializePool(pool *pgx.ConnPool) error {
-	db, err := stdlib.OpenFromConnPool(pool)
-	if err != nil {
-		return err
-	}
-	return driver.initialize(db)
+	return driver.initialize(pool)
 }
 
 func (driver *Driver) Initialize(url string) error {
-	db, err := sql.Open("pgx", url)
+	connConfig, err := pgx.ParseConnectionString(url)
 	if err != nil {
 		return err
 	}
-	return driver.initialize(db)
-}
-
-func (driver *Driver) initialize(db *sql.DB) error {
-	if err := db.Ping(); err != nil {
+	pool, err := pgx.NewConnPool(pgx.ConnPoolConfig{
+		ConnConfig: connConfig,
+	})
+	if err != nil {
 		return err
 	}
-	driver.db = db
+	return driver.initialize(pool)
+}
+
+func (driver *Driver) initialize(pool *pgx.ConnPool) error {
+	driver.pool = pool
 
 	if err := driver.ensureVersionTableExists(); err != nil {
 		return err
@@ -58,11 +56,12 @@ func (driver *Driver) initialize(db *sql.DB) error {
 }
 
 func (driver *Driver) Close() error {
-	return driver.db.Close()
+	// driver.pool.Close() // don't close pool
+	return nil
 }
 
 func (driver *Driver) ensureVersionTableExists() error {
-	if _, err := driver.db.Exec("CREATE TABLE IF NOT EXISTS " + driver.tableName + " (version int not null primary key);"); err != nil {
+	if _, err := driver.pool.Exec("CREATE TABLE IF NOT EXISTS " + driver.tableName + " (version int not null primary key);"); err != nil {
 		return err
 	}
 	return nil
@@ -73,7 +72,26 @@ func (driver *Driver) FilenameExtension() string {
 }
 
 func (driver *Driver) Begin() (driver.Tx, error) {
-	return driver.db.Begin()
+	tx, err := driver.pool.Begin()
+	if err != nil {
+		return nil, err
+	}
+	return &trans{tx}, nil
+}
+
+type trans struct {
+	tx *pgx.Tx
+}
+
+func (tx *trans) Exec(query string, args ...interface{}) error {
+	_, err := tx.tx.Exec(query, args...)
+	return err
+}
+func (tx *trans) Rollback() error {
+	return tx.tx.Rollback()
+}
+func (tx *trans) Commit() error {
+	return tx.tx.Commit()
 }
 
 func (driver *Driver) Migrate(tx driver.Tx, f file.File, pipe chan interface{}) {
@@ -81,7 +99,7 @@ func (driver *Driver) Migrate(tx driver.Tx, f file.File, pipe chan interface{}) 
 	pipe <- f
 
 	if f.Direction == direction.Up {
-		if _, err := tx.Exec("INSERT INTO "+driver.tableName+" (version) VALUES ($1)", f.Version); err != nil {
+		if err := tx.Exec("INSERT INTO "+driver.tableName+" (version) VALUES ($1)", f.Version); err != nil {
 			pipe <- err
 			if err := tx.Rollback(); err != nil {
 				pipe <- err
@@ -89,7 +107,7 @@ func (driver *Driver) Migrate(tx driver.Tx, f file.File, pipe chan interface{}) 
 			return
 		}
 	} else if f.Direction == direction.Down {
-		if _, err := tx.Exec("DELETE FROM "+driver.tableName+" WHERE version=$1", f.Version); err != nil {
+		if err := tx.Exec("DELETE FROM "+driver.tableName+" WHERE version=$1", f.Version); err != nil {
 			pipe <- err
 			if err := tx.Rollback(); err != nil {
 				pipe <- err
@@ -103,7 +121,7 @@ func (driver *Driver) Migrate(tx driver.Tx, f file.File, pipe chan interface{}) 
 		return
 	}
 
-	if _, err := tx.Exec(string(f.Content)); err != nil {
+	if err := tx.Exec(string(f.Content)); err != nil {
 		pqErr := err.(pgx.PgError)
 		offset := int(pqErr.Position)
 		if offset >= 0 {
@@ -127,9 +145,9 @@ func (driver *Driver) Migrate(tx driver.Tx, f file.File, pipe chan interface{}) 
 
 func (driver *Driver) Version() (uint64, error) {
 	var version uint64
-	err := driver.db.QueryRow("SELECT version FROM " + driver.tableName + " ORDER BY version DESC LIMIT 1").Scan(&version)
+	err := driver.pool.QueryRow("SELECT version FROM " + driver.tableName + " ORDER BY version DESC LIMIT 1").Scan(&version)
 	switch {
-	case err == sql.ErrNoRows:
+	case err == pgx.ErrNoRows:
 		return 0, nil
 	case err != nil:
 		return 0, err
@@ -138,7 +156,6 @@ func (driver *Driver) Version() (uint64, error) {
 	}
 }
 
-// registering doesn't help since the driver lookup is done by the url scheme, which is 'postgres'
-// func init() {
-// 	driver.RegisterDriver("pgx", &Driver{tableName: defaultTableName})
-// }
+func init() {
+	driver.RegisterDriver("postgres", &Driver{tableName: defaultTableName})
+}

@@ -1,7 +1,6 @@
 package migrate
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/acls/migrate/driver"
@@ -47,9 +46,9 @@ func (t *transaction) Begin() (driver.Tx, error) {
 		return t, nil
 	}
 }
-func (t *transaction) Exec(query string, args ...interface{}) (sql.Result, error) {
+func (t *transaction) Exec(query string, args ...interface{}) error {
 	if t.tx == nil {
-		return nil, fmt.Errorf("no transaction")
+		return fmt.Errorf("no transaction")
 	}
 	return t.tx.Exec(query, args...)
 }

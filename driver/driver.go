@@ -2,7 +2,6 @@
 package driver
 
 import (
-	"database/sql"
 	"fmt"
 	neturl "net/url" // alias to allow `url string` func signature in New
 
@@ -11,7 +10,7 @@ import (
 
 // Tx interface
 type Tx interface {
-	Exec(query string, args ...interface{}) (sql.Result, error)
+	Exec(query string, args ...interface{}) error
 	Rollback() error
 	Commit() error
 }
