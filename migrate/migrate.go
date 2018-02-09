@@ -308,7 +308,7 @@ func handleInterrupts() chan os.Signal {
 }
 
 // txType is an internal variable that holds the transaction type
-var txType = txtype.TxPerFile
+var txType = txtype.TxSingle
 
 // SingleTransaction asdf
 func SingleTransaction() {

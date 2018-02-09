@@ -21,6 +21,7 @@ import (
 var url = flag.String("url", os.Getenv("MIGRATE_URL"), "")
 var migrationsPath = flag.String("path", "", "")
 var version = flag.Bool("version", false, "Show migrate version")
+var perFileTrans = flag.Bool("perfile", false, "Per File Transaction. Defaults to one transaction for all files.")
 
 func main() {
 	flag.Usage = func() {
@@ -36,6 +37,10 @@ func main() {
 
 	if *migrationsPath == "" {
 		*migrationsPath, _ = os.Getwd()
+	}
+
+	if *perFileTrans {
+		migrate.PerFileTransaction()
 	}
 
 	switch command {
