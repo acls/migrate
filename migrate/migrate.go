@@ -8,176 +8,266 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"strconv"
+	"sort"
 	"strings"
 
 	"github.com/acls/migrate/driver"
 	"github.com/acls/migrate/file"
 	"github.com/acls/migrate/migrate/direction"
-	"github.com/acls/migrate/migrate/txtype"
 	pipep "github.com/acls/migrate/pipe"
 )
 
-// Up applies all available migrations
-func Up(pipe chan interface{}, url, migrationsPath string) {
-	d, files, version, err := initDriverAndReadMigrationFilesAndGetVersion(url, migrationsPath)
-	if err != nil {
-		go pipep.Close(pipe, err)
+// Migrator struct
+type Migrator struct {
+	Driver driver.Driver
+	// Path for schema migrations.
+	Path string
+	// Path for storing executed migrations that are used for validation and for downgrading when the versions don't exist in MigrationsPath
+	PrevPath string
+	// True if a transaction should be used for each file instead of per each major version
+	TxPerFile bool
+	// True if the migration should be interruptable
+	Interrupts bool
+	// Don't validate base upfiles
+	Force bool
+}
+
+func (m *Migrator) init(conn driver.Conn, validate bool) (prevFiles, files file.MigrationFiles, version file.Version, err error) {
+	if err = m.Driver.EnsureVersionTable(conn); err != nil {
 		return
 	}
 
-	applyMigrationFiles, err := files.ToLastFrom(version)
-	if err != nil {
-		if err2 := d.Close(); err2 != nil {
-			pipe <- err2
+	// only read files if prev path exists
+	if m.PrevPath != "" {
+		if _, e := os.Stat(m.PrevPath); !os.IsNotExist(e) {
+			prevFiles, err = file.ReadMigrationFiles(m.PrevPath, file.FilenameRegex(m.Driver.FilenameExtension()))
+			if err != nil {
+				return
+			}
 		}
+	}
+	files, err = file.ReadMigrationFiles(m.Path, file.FilenameRegex(m.Driver.FilenameExtension()))
+	if err != nil {
+		return
+	}
+	version, err = m.Driver.Version(conn)
+	if err != nil {
+		return
+	}
+
+	if validate {
+		lastVersion := files.LastVersion()
+		if lastVersion.Compare(version) < 0 {
+			err = fmt.Errorf("Last file version %v is less than database version %v", lastVersion, version)
+			return
+		}
+
+		if !m.Force {
+			// check that base upfiles match
+			if err = files.ValidateBaseFiles(prevFiles); err != nil {
+				return
+			}
+		}
+	}
+	return
+}
+
+// Up applies all available migrations
+func (m *Migrator) Up(pipe chan interface{}, conn driver.Conn) {
+	_, files, version, err := m.init(conn, true)
+	if err != nil {
 		go pipep.Close(pipe, err)
 		return
 	}
 
-	MigrateFiles(pipe, d, applyMigrationFiles)
+	applyMigrations, err := files.ToLastFrom(version)
+	if err != nil {
+		go pipep.Close(pipe, err)
+		return
+	}
+
+	m.MigrateFiles(pipe, conn, files, applyMigrations)
 }
 
 // UpSync is synchronous version of Up
-func UpSync(url, migrationsPath string) (err []error, ok bool) {
+func (m *Migrator) UpSync(conn driver.Conn) (errs []error) {
 	pipe := pipep.New()
-	go Up(pipe, url, migrationsPath)
-	err = pipep.ReadErrors(pipe)
-	return err, len(err) == 0
+	go m.Up(pipe, conn)
+	errs = pipep.ReadErrors(pipe)
+	return
 }
 
 // Down rolls back all migrations
-func Down(pipe chan interface{}, url, migrationsPath string) {
-	d, files, version, err := initDriverAndReadMigrationFilesAndGetVersion(url, migrationsPath)
+func (m *Migrator) Down(pipe chan interface{}, conn driver.Conn) {
+	_, files, version, err := m.init(conn, true)
 	if err != nil {
 		go pipep.Close(pipe, err)
 		return
 	}
 
-	applyMigrationFiles, err := files.ToFirstFrom(version)
+	applyMigrations, err := files.ToFirstFrom(version)
 	if err != nil {
-		if err2 := d.Close(); err2 != nil {
-			pipe <- err2
-		}
 		go pipep.Close(pipe, err)
 		return
 	}
 
-	MigrateFiles(pipe, d, applyMigrationFiles)
+	m.MigrateFiles(pipe, conn, files, applyMigrations)
 }
 
 // DownSync is synchronous version of Down
-func DownSync(url, migrationsPath string) (err []error, ok bool) {
+func (m *Migrator) DownSync(conn driver.Conn) (errs []error) {
 	pipe := pipep.New()
-	go Down(pipe, url, migrationsPath)
-	err = pipep.ReadErrors(pipe)
-	return err, len(err) == 0
+	go m.Down(pipe, conn)
+	errs = pipep.ReadErrors(pipe)
+	return
 }
 
 // Redo rolls back the most recently applied migration, then runs it again.
-func Redo(pipe chan interface{}, url, migrationsPath string) {
+func (m *Migrator) Redo(pipe chan interface{}, conn driver.Conn) {
 	pipe1 := pipep.New()
-	go Migrate(pipe1, url, migrationsPath, -1)
-	if ok := pipep.WaitAndRedirect(pipe1, pipe, handleInterrupts()); !ok {
+	go m.Migrate(pipe1, conn, -1)
+	if ok := pipep.WaitAndRedirect(pipe1, pipe, m.handleInterrupts()); !ok {
 		go pipep.Close(pipe, nil)
 		return
 	} else {
-		go Migrate(pipe, url, migrationsPath, +1)
+		go m.Migrate(pipe, conn, +1)
 	}
 }
 
 // RedoSync is synchronous version of Redo
-func RedoSync(url, migrationsPath string) (err []error, ok bool) {
+func (m *Migrator) RedoSync(conn driver.Conn) (errs []error) {
 	pipe := pipep.New()
-	go Redo(pipe, url, migrationsPath)
-	err = pipep.ReadErrors(pipe)
-	return err, len(err) == 0
+	go m.Redo(pipe, conn)
+	errs = pipep.ReadErrors(pipe)
+	return
 }
 
 // Reset runs the down and up migration function
-func Reset(pipe chan interface{}, url, migrationsPath string) {
+func (m *Migrator) Reset(pipe chan interface{}, conn driver.Conn) {
 	pipe1 := pipep.New()
-	go Down(pipe1, url, migrationsPath)
-	if ok := pipep.WaitAndRedirect(pipe1, pipe, handleInterrupts()); !ok {
+	go m.Down(pipe1, conn)
+	if ok := pipep.WaitAndRedirect(pipe1, pipe, m.handleInterrupts()); !ok {
 		go pipep.Close(pipe, nil)
 		return
 	} else {
-		go Up(pipe, url, migrationsPath)
+		go m.Up(pipe, conn)
 	}
 }
 
 // ResetSync is synchronous version of Reset
-func ResetSync(url, migrationsPath string) (err []error, ok bool) {
+func (m *Migrator) ResetSync(conn driver.Conn) (errs []error) {
 	pipe := pipep.New()
-	go Reset(pipe, url, migrationsPath)
-	err = pipep.ReadErrors(pipe)
-	return err, len(err) == 0
+	go m.Reset(pipe, conn)
+	errs = pipep.ReadErrors(pipe)
+	return
 }
 
-// Migrate applies relative +n/-n migrations
-func Migrate(pipe chan interface{}, url, migrationsPath string, relativeN int) {
-	d, files, version, err := initDriverAndReadMigrationFilesAndGetVersion(url, migrationsPath)
+// MigrateBetween migrates to the destination version
+func (m *Migrator) MigrateBetween(pipe chan interface{}, conn driver.Conn) (curVersion, dstVersion file.Version) {
+	prevFiles, files, version, err := m.init(conn, false)
 	if err != nil {
 		go pipep.Close(pipe, err)
 		return
 	}
 
-	applyMigrationFiles, err := files.From(version, relativeN)
+	curVersion, dstVersion, applyMigrations, err := files.Between(prevFiles, m.Force)
 	if err != nil {
-		if err2 := d.Close(); err2 != nil {
-			pipe <- err2
-		}
+		go pipep.Close(pipe, err)
+		return
+	}
+
+	if curVersion.Compare(file.Version{}) != 0 &&
+		// version.Compare(file.Version{}) != 0 &&
+		curVersion.Compare(version) != 0 {
+		go pipep.Close(pipe, fmt.Errorf("Database version(%v) doesn't match current migration files version(%v) PrevPath:%s", version, curVersion, m.PrevPath))
+		return
+	}
+
+	m.MigrateFiles(pipe, conn, files, applyMigrations)
+	return
+}
+
+// MigrateBetweenSync is synchronous version of MigrateBetween
+func (m *Migrator) MigrateBetweenSync(conn driver.Conn) (curVersion, dstVersion file.Version, errs []error) {
+	pipe := pipep.New()
+	go func() {
+		curVersion, dstVersion = m.MigrateBetween(pipe, conn)
+	}()
+	errs = pipep.ReadErrors(pipe)
+	return
+}
+
+// MigrateTo migrates to the destination version
+func (m *Migrator) MigrateTo(pipe chan interface{}, conn driver.Conn, dstVersion file.Version) (version file.Version) {
+	_, files, version, err := m.init(conn, true)
+	if err != nil {
+		go pipep.Close(pipe, err)
+		return
+	}
+
+	applyMigrations, err := files.FromTo(version, dstVersion)
+	if err != nil {
+		go pipep.Close(pipe, err)
+		return
+	}
+
+	m.MigrateFiles(pipe, conn, files, applyMigrations)
+	return version
+}
+
+// MigrateToSync is synchronous version of MigrateTo
+func (m *Migrator) MigrateToSync(conn driver.Conn, dstVersion file.Version) (version file.Version, errs []error) {
+	pipe := pipep.New()
+	go func() {
+		version = m.MigrateTo(pipe, conn, dstVersion)
+	}()
+	errs = pipep.ReadErrors(pipe)
+	return
+}
+
+// Migrate applies relative +n/-n migrations
+func (m *Migrator) Migrate(pipe chan interface{}, conn driver.Conn, relativeN int) {
+	_, files, version, err := m.init(conn, true)
+	if err != nil {
+		go pipep.Close(pipe, err)
+		return
+	}
+
+	applyMigrations, err := files.From(version, relativeN)
+	if err != nil {
 		go pipep.Close(pipe, err)
 		return
 	}
 
 	if relativeN == 0 {
-		applyMigrationFiles = nil
+		applyMigrations = nil
 	}
 
-	MigrateFiles(pipe, d, applyMigrationFiles)
+	m.MigrateFiles(pipe, conn, files, applyMigrations)
 }
 
 // MigrateSync is synchronous version of Migrate
-func MigrateSync(url, migrationsPath string, relativeN int) (err []error, ok bool) {
+func (m *Migrator) MigrateSync(conn driver.Conn, relativeN int) (errs []error) {
 	pipe := pipep.New()
-	go Migrate(pipe, url, migrationsPath, relativeN)
-	err = pipep.ReadErrors(pipe)
-	return err, len(err) == 0
-}
-
-// Version returns the current migration version
-func Version(url, migrationsPath string) (version uint64, err error) {
-	d, err := driver.New(url)
-	if err != nil {
-		return 0, err
-	}
-	return d.Version()
+	go m.Migrate(pipe, conn, relativeN)
+	errs = pipep.ReadErrors(pipe)
+	return
 }
 
 // Create creates new migration files on disk
-func Create(url, migrationsPath, name string, contents ...string) (*file.MigrationFile, error) {
-	d, err := driver.New(url)
-	if err != nil {
-		return nil, err
-	}
-	files, err := file.ReadMigrationFiles(migrationsPath, file.FilenameRegex(d.FilenameExtension()))
+func (m *Migrator) Create(incMajor bool, name string, contents ...string) (*file.MigrationFile, error) {
+	migrationsPath := m.Path
+	files, err := file.ReadMigrationFiles(migrationsPath, file.FilenameRegex(m.Driver.FilenameExtension()))
 	if err != nil {
 		return nil, err
 	}
 
-	version := uint64(0)
+	version := file.Version{}
 	if len(files) > 0 {
 		lastFile := files[len(files)-1]
 		version = lastFile.Version
 	}
-	version += 1
-	versionStr := strconv.FormatUint(version, 10)
-
-	length := 4 // TODO(mattes) check existing files and try to guess length
-	if len(versionStr)%length != 0 {
-		versionStr = strings.Repeat("0", length-len(versionStr)%length) + versionStr
-	}
+	version = version.Inc(incMajor)
 
 	filenamef := "%s_%s.%s.%s"
 	name = strings.Replace(name, " ", "_", -1)
@@ -191,18 +281,22 @@ func Create(url, migrationsPath, name string, contents ...string) (*file.Migrati
 		downContent = contents[1]
 	}
 
+	migrationsPath = path.Join(migrationsPath, version.MajorString())
+	os.MkdirAll(migrationsPath, 0700)
+
+	minorStr := version.MinorString()
 	mfile := &file.MigrationFile{
 		Version: version,
 		UpFile: &file.File{
 			Path:      migrationsPath,
-			FileName:  fmt.Sprintf(filenamef, versionStr, name, "up", d.FilenameExtension()),
+			FileName:  fmt.Sprintf(filenamef, minorStr, name, "up", m.Driver.FilenameExtension()),
 			Name:      name,
 			Content:   []byte(upContent),
 			Direction: direction.Up,
 		},
 		DownFile: &file.File{
 			Path:      migrationsPath,
-			FileName:  fmt.Sprintf(filenamef, versionStr, name, "down", d.FilenameExtension()),
+			FileName:  fmt.Sprintf(filenamef, minorStr, name, "down", m.Driver.FilenameExtension()),
 			Name:      name,
 			Content:   []byte(downContent),
 			Direction: direction.Down,
@@ -220,56 +314,96 @@ func Create(url, migrationsPath, name string, contents ...string) (*file.Migrati
 }
 
 // MigrateFiles applies migrations in given files
-func MigrateFiles(pipe chan interface{}, d driver.Driver, applyMigrationFiles []file.File) {
-	if len(applyMigrationFiles) > 0 {
-		t := &transaction{d: d, typ: txType}
-		for _, f := range applyMigrationFiles {
-			tx, err := t.Begin()
-			if err != nil {
-				go pipep.Close(pipe, err)
-				return
-			}
+func (m *Migrator) MigrateFiles(pipe chan interface{}, conn driver.Conn, files file.MigrationFiles, applyMigrations file.Migrations) {
+	var err error
+	defer func() {
+		go pipep.Close(pipe, err)
+	}()
 
-			pipe1 := pipep.New()
-			go d.Migrate(tx, f, pipe1)
-			if ok := pipep.WaitAndRedirect(pipe1, pipe, handleInterrupts()); !ok {
-				break
-			}
-		}
-		if err := t.CommitAll(); err != nil {
-			pipe <- err
-		}
-		if err := d.Close(); err != nil {
-			pipe <- err
-		}
-		go pipep.Close(pipe, nil)
+	if m.PrevPath == m.Path {
+		fmt.Println(m.PrevPath, m.Path)
+		err = fmt.Errorf("PrevPath must be different than Path")
 		return
 	}
 
-	if err := d.Close(); err != nil {
-		pipe <- err
-	}
-	go pipep.Close(pipe, nil)
+	err = m.migrateFiles(pipe, conn, files, applyMigrations)
 }
 
-// initDriverAndReadMigrationFilesAndGetVersion is a small helper
-// function that is common to most of the migration funcs
-func initDriverAndReadMigrationFilesAndGetVersion(url, migrationsPath string) (driver.Driver, *file.MigrationFiles, uint64, error) {
-	d, err := driver.New(url)
-	if err != nil {
-		return nil, nil, 0, err
+func (m *Migrator) migrateFiles(pipe chan interface{}, conn driver.Conn, files file.MigrationFiles, applyMigrations file.Migrations) error {
+	if len(applyMigrations) == 0 {
+		return nil
 	}
-	files, err := file.ReadMigrationFiles(migrationsPath, file.FilenameRegex(d.FilenameExtension()))
-	if err != nil {
-		d.Close() // TODO what happens with errors from this func?
-		return nil, nil, 0, err
+
+	var (
+		commitDir   = m.PrevPath
+		txFiles     file.Migrations
+		tx          driver.Tx
+		err         error
+		prevVersion file.Version
+	)
+
+	first := applyMigrations[0]
+	if commitDir != "" && first.Up() {
+		// if migrating up, (re)write prev files that should already exist
+		sort.Sort(files)
+		for _, f := range files {
+			if f.Compare(first.Version) >= 0 {
+				break
+			}
+			f.UpFile.Direction = 0
+			pipe <- f.UpFile
+			if err := f.WriteFiles(commitDir); err != nil {
+				return err
+			}
+		}
 	}
-	version, err := d.Version()
-	if err != nil {
-		d.Close() // TODO what happens with errors from this func?
-		return nil, nil, 0, err
+
+	commit := func() error {
+		// commit transaction
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		tx = nil
+		// commit(delete/write) files for versions just executed and committed
+		if commitDir != "" {
+			for _, f := range txFiles {
+				if err := f.Commit(commitDir); err != nil {
+					return err
+				}
+			}
+		}
+		txFiles = nil
+		return nil
 	}
-	return d, &files, version, nil
+
+	txPerFile := m.TxPerFile
+	for _, f := range applyMigrations {
+		// fmt.Println("f", f)
+		// commit if per file or major version changed
+		if tx != nil && (txPerFile || prevVersion.Major != f.Major) {
+			if err := commit(); err != nil {
+				return err
+			}
+		}
+		// begin new transaction if no active transaction
+		if tx == nil {
+			tx, err = conn.Begin()
+			if err != nil {
+				return err
+			}
+		}
+
+		pipe1 := pipep.New()
+		go m.Driver.Migrate(tx, f.File(), pipe1)
+		if ok := pipep.WaitAndRedirect(pipe1, pipe, m.handleInterrupts()); !ok {
+			return tx.Rollback()
+		}
+
+		txFiles = append(txFiles, f)
+		prevVersion = f.Version
+	}
+	// commit last transaction
+	return commit()
 }
 
 // NewPipe is a convenience function for pipe.New().
@@ -278,44 +412,13 @@ func NewPipe() chan interface{} {
 	return pipep.New()
 }
 
-// interrupts is an internal variable that holds the state of
-// interrupt handling
-var interrupts = true
-
-// Graceful enables interrupts checking. Once the first ^C is received
-// it will finish the currently running migration and abort execution
-// of the next migration. If ^C is received twice, it will stop
-// execution immediately.
-func Graceful() {
-	interrupts = true
-}
-
-// NonGraceful disables interrupts checking. The first received ^C will
-// stop execution immediately.
-func NonGraceful() {
-	interrupts = false
-}
-
 // interrupts returns a signal channel if interrupts checking is
 // enabled. nil otherwise.
-func handleInterrupts() chan os.Signal {
-	if interrupts {
+func (m *Migrator) handleInterrupts() chan os.Signal {
+	if m.Interrupts {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, os.Interrupt)
 		return c
 	}
 	return nil
-}
-
-// txType is an internal variable that holds the transaction type
-var txType = txtype.TxSingle
-
-// SingleTransaction asdf
-func SingleTransaction() {
-	txType = txtype.TxSingle
-}
-
-// PerFileTransaction asdf
-func PerFileTransaction() {
-	txType = txtype.TxPerFile
 }

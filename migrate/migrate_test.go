@@ -2,14 +2,25 @@ package migrate
 
 import (
 	"io/ioutil"
+	"path"
 	"testing"
 	// Ensure imports for each driver we wish to test
 
-	_ "github.com/acls/migrate/driver/pgx"
+	"github.com/acls/migrate/driver"
+	mpgx "github.com/acls/migrate/driver/pgx"
+	"github.com/acls/migrate/file"
 	"github.com/acls/migrate/testutil"
 )
 
 var schema = "migrate_migrate"
+
+func NewMigratorAndConn(t *testing.T, tmpdir string) (*Migrator, driver.Conn) {
+	return &Migrator{
+		Driver:   mpgx.New(""),
+		Path:     tmpdir,
+		PrevPath: tmpdir + "-prev",
+	}, mpgx.Conn(testutil.MustInitPgx(t, schema))
+}
 
 func TestCreate(t *testing.T) {
 	tmpdir, err := ioutil.TempDir("/tmp", "migrate-test")
@@ -17,16 +28,16 @@ func TestCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, driverURL := testutil.MustInitPgx(t, schema)
-	defer conn.Close()
-	if _, err := Create(driverURL, tmpdir, "test_migration"); err != nil {
+	m, conn := NewMigratorAndConn(t, tmpdir)
+	conn.Close()
+	if _, err := m.Create(false, "test_migration"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Create(driverURL, tmpdir, "another migration"); err != nil {
+	if _, err := m.Create(false, "another migration"); err != nil {
 		t.Fatal(err)
 	}
 
-	files, err := ioutil.ReadDir(tmpdir)
+	files, err := ioutil.ReadDir(path.Join(tmpdir, file.Version{}.MajorString()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +58,25 @@ func TestCreate(t *testing.T) {
 		}
 	}
 	if foundCounter != len(expectFiles) {
-		t.Error("not all expected files have been found")
+		t.Error("not all expected files have been found", foundCounter, len(expectFiles))
+	}
+}
+
+func createMigrations(t *testing.T, m *Migrator) {
+	if _, err := m.Create(false, "migration1", "CREATE TABLE t1 (id INTEGER PRIMARY KEY);", "DROP TABLE t1;"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Create(false, "migration2", "CREATE TABLE t2 (id INTEGER PRIMARY KEY);", "DROP TABLE t2;"); err != nil {
+		t.Fatal(err)
+	}
+	// temp table 'tmp_tbl' will conflict if not in separate transactions
+	if _, err := m.Create(false, "migration3", `CREATE TABLE t3 (id INTEGER PRIMARY KEY);
+		CREATE TEMP TABLE tmp_tbl ON COMMIT DROP AS SELECT 1;`, "DROP TABLE t3;"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Create(true, "migration4", `CREATE TABLE t4 (id INTEGER PRIMARY KEY);
+		CREATE TEMP TABLE tmp_tbl ON COMMIT DROP AS SELECT 1;`, "DROP TABLE t4;"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -57,21 +86,21 @@ func TestReset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, driverURL := testutil.MustInitPgx(t, schema)
+	m, conn := NewMigratorAndConn(t, tmpdir)
 	defer conn.Close()
-	Create(driverURL, tmpdir, "migration1", "CREATE TABLE t1 (id INTEGER PRIMARY KEY);", "DROP TABLE t1;")
-	Create(driverURL, tmpdir, "migration2", "CREATE TABLE t2 (id INTEGER PRIMARY KEY);", "DROP TABLE t2;")
+	createMigrations(t, m)
 
-	errs, ok := ResetSync(driverURL, tmpdir)
-	if !ok {
+	errs := m.ResetSync(conn)
+	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	version, err := Version(driverURL, tmpdir)
+	version, err := m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("Expected version 2, got %v", version)
+	expect := file.Version{Major: 1, Minor: 1}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 }
 
@@ -81,33 +110,34 @@ func TestDown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, driverURL := testutil.MustInitPgx(t, schema)
+	m, conn := NewMigratorAndConn(t, tmpdir)
 	defer conn.Close()
-	Create(driverURL, tmpdir, "migration1", "CREATE TABLE t1 (id INTEGER PRIMARY KEY);", "DROP TABLE t1;")
-	Create(driverURL, tmpdir, "migration2", "CREATE TABLE t2 (id INTEGER PRIMARY KEY);", "DROP TABLE t2;")
+	createMigrations(t, m)
 
-	errs, ok := MigrateSync(driverURL, tmpdir, +1)
-	if !ok {
+	errs := m.MigrateSync(conn, +1)
+	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	version, err := Version(driverURL, tmpdir)
+	version, err := m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 {
-		t.Fatalf("Expected version 1, got %v", version)
+	expect := file.Version{Major: 0, Minor: 1}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 
-	errs, ok = ResetSync(driverURL, tmpdir)
-	if !ok {
+	errs = m.ResetSync(conn)
+	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	version, err = Version(driverURL, tmpdir)
+	version, err = m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("Expected version 2, got %v", version)
+	expect = file.Version{Major: 1, Minor: 1}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 }
 
@@ -117,21 +147,21 @@ func TestUp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, driverURL := testutil.MustInitPgx(t, schema)
+	m, conn := NewMigratorAndConn(t, tmpdir)
 	defer conn.Close()
-	Create(driverURL, tmpdir, "migration1", "CREATE TABLE t1 (id INTEGER PRIMARY KEY);", "DROP TABLE t1;")
-	Create(driverURL, tmpdir, "migration2", "CREATE TABLE t2 (id INTEGER PRIMARY KEY);", "DROP TABLE t2;")
+	createMigrations(t, m)
 
-	errs, ok := UpSync(driverURL, tmpdir)
-	if !ok {
+	errs := m.UpSync(conn)
+	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	version, err := Version(driverURL, tmpdir)
+	version, err := m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("Expected version 2, got %v", version)
+	expect := file.Version{Major: 1, Minor: 1}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 }
 
@@ -141,33 +171,34 @@ func TestRedo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, driverURL := testutil.MustInitPgx(t, schema)
+	m, conn := NewMigratorAndConn(t, tmpdir)
 	defer conn.Close()
-	Create(driverURL, tmpdir, "migration1", "CREATE TABLE t1 (id INTEGER PRIMARY KEY);", "DROP TABLE t1;")
-	Create(driverURL, tmpdir, "migration2", "CREATE TABLE t2 (id INTEGER PRIMARY KEY);", "DROP TABLE t2;")
+	createMigrations(t, m)
 
-	errs, ok := UpSync(driverURL, tmpdir)
-	if !ok {
+	errs := m.UpSync(conn)
+	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	version, err := Version(driverURL, tmpdir)
+	version, err := m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("Expected version 2, got %v", version)
+	expect := file.Version{Major: 1, Minor: 1}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 
-	errs, ok = RedoSync(driverURL, tmpdir)
-	if !ok {
+	errs = m.RedoSync(conn)
+	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	version, err = Version(driverURL, tmpdir)
+	version, err = m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("Expected version 2, got %v", version)
+	expect = file.Version{Major: 1, Minor: 1}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 }
 
@@ -177,45 +208,47 @@ func TestMigrate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, driverURL := testutil.MustInitPgx(t, schema)
+	m, conn := NewMigratorAndConn(t, tmpdir)
 	defer conn.Close()
-	Create(driverURL, tmpdir, "migration1", "CREATE TABLE t1 (id INTEGER PRIMARY KEY);", "DROP TABLE t1;")
-	Create(driverURL, tmpdir, "migration2", "CREATE TABLE t2 (id INTEGER PRIMARY KEY);", "DROP TABLE t2;")
+	createMigrations(t, m)
 
-	errs, ok := MigrateSync(driverURL, tmpdir, +2)
-	if !ok {
+	errs := m.MigrateSync(conn, +2)
+	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	version, err := Version(driverURL, tmpdir)
+	version, err := m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("Expected version 2, got %v", version)
+	expect := file.Version{Major: 0, Minor: 2}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 
-	errs, ok = MigrateSync(driverURL, tmpdir, -2)
-	if !ok {
+	errs = m.MigrateSync(conn, -2)
+	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	version, err = Version(driverURL, tmpdir)
+	version, err = m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 0 {
-		t.Fatalf("Expected version 0, got %v", version)
+	expect = file.Version{Major: 0, Minor: 0}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 
-	errs, ok = MigrateSync(driverURL, tmpdir, +1)
-	if !ok {
+	errs = m.MigrateSync(conn, +1)
+	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	version, err = Version(driverURL, tmpdir)
+	version, err = m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 {
-		t.Fatalf("Expected version 1, got %v", version)
+	expect = file.Version{Major: 0, Minor: 1}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 }
 
@@ -225,20 +258,21 @@ func TestMigrate_Up_Bad(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, driverURL := testutil.MustInitPgx(t, schema)
+	m, conn := NewMigratorAndConn(t, tmpdir)
 	defer conn.Close()
-	Create(driverURL, tmpdir, "migration1", "CREATE TABLE t1 (id INTEGER PRIMARY KEY);", "DROP TABLE t1;")
-	Create(driverURL, tmpdir, "migration2", "Not valid sql", "DROP TABLE t2;")
+	m.Create(false, "migration1", "CREATE TABLE t1 (id INTEGER PRIMARY KEY);", "DROP TABLE t1;")
+	m.Create(false, "migration2", "Not valid sql", "DROP TABLE t2;")
 
-	_, ok := MigrateSync(driverURL, tmpdir, +2)
-	if ok {
+	errs := m.MigrateSync(conn, +2)
+	if len(errs) == 0 {
 		t.Fatal("Expect an error")
 	}
-	version, err := Version(driverURL, tmpdir)
+	version, err := m.Driver.Version(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 {
-		t.Fatalf("Expected version 1, got %v", version)
+	expect := file.Version{Major: 0, Minor: 0}
+	if expect.Compare(version) != 0 {
+		t.Fatalf("Expected version %v, got %v", expect, version)
 	}
 }

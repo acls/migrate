@@ -2,75 +2,81 @@
 package driver
 
 import (
-	"fmt"
-	neturl "net/url" // alias to allow `url string` func signature in New
-
 	"github.com/acls/migrate/file"
 )
 
+// Execer interface
+type Execer interface {
+	Exec(query string, args ...interface{}) error
+}
+
+// RowQueryer defines a database that can query a row.
+type RowQueryer interface {
+	QueryRow(query string, args ...interface{}) Scanner
+}
+
+// Databaser interface
+type Databaser interface {
+	Execer
+	Query(query string, args ...interface{}) (RowsScanner, error)
+	RowQueryer
+}
+
+// Beginner defines a database that can begin a transaction.
+type Beginner interface {
+	Begin() (Tx, error)
+}
+
+// Conn interface
+type Conn interface {
+	Databaser
+	Beginner
+	Close() error
+}
+
 // Tx interface
 type Tx interface {
-	Exec(query string, args ...interface{}) error
+	Databaser
 	Rollback() error
 	Commit() error
 }
 
+// RowsScanner defines a type that can scan rows returned from a database query.
+type RowsScanner interface {
+	// Columns() ([]string, error)
+	Scan(dest ...interface{}) (err error)
+	Err() error
+	Next() bool
+	Close()
+}
+
+// Scanner defines a type that can handle basic row scanning from a db query.
+type Scanner interface {
+	// Columns() ([]string, error)
+	Scan(dest ...interface{}) (err error)
+}
+
 // Driver is the interface type that needs to implemented by all drivers.
 type Driver interface {
+	// Creates and returns a connection
+	NewConn(url string) (conn Conn, err error)
 
-	// Initialize is the first function to be called.
-	// Check the url string and open and verify any connection
-	// that has to be made.
-	Initialize(url string) error
-
-	// Close is the last function to be called.
-	// Close any open connection here.
-	Close() error
+	// Ensure the version table exists
+	EnsureVersionTable(db Beginner) (err error)
 
 	// FilenameExtension returns the extension of the migration files.
 	// The returned string must not begin with a dot.
 	FilenameExtension() string
 
-	// Begin returns a new driver transaction
-	Begin() (Tx, error)
+	// TableName returns the table name used for storing schema migration versions.
+	TableName() string
 
 	// Migrate is the heart of the driver.
 	// It will receive a file which the driver should apply
 	// to its backend or whatever. The migration function should use
 	// the pipe channel to return any errors or other useful information.
-	Migrate(tx Tx, file file.File, pipe chan interface{})
+	Migrate(db Databaser, file *file.File, pipe chan interface{})
 
 	// Version returns the current migration version.
-	Version() (uint64, error)
-}
-
-// New returns Driver and calls Initialize on it
-func New(url string) (Driver, error) {
-	u, err := neturl.Parse(url)
-	if err != nil {
-		return nil, err
-	}
-
-	d := GetDriver(u.Scheme)
-	if d == nil {
-		return nil, fmt.Errorf("Driver '%s' not found.", u.Scheme)
-	}
-	verifyFilenameExtension(u.Scheme, d)
-	if err := d.Initialize(url); err != nil {
-		return nil, err
-	}
-
-	return d, nil
-}
-
-// verifyFilenameExtension panics if the driver's filename extension
-// is not correct or empty.
-func verifyFilenameExtension(driverName string, d Driver) {
-	f := d.FilenameExtension()
-	if f == "" {
-		panic(fmt.Sprintf("%s.FilenameExtension() returns empty string.", driverName))
-	}
-	if f[0:1] == "." {
-		panic(fmt.Sprintf("%s.FilenameExtension() returned string must not start with a dot.", driverName))
-	}
+	Version(db RowQueryer) (version file.Version, err error)
 }

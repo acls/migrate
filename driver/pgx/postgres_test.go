@@ -14,19 +14,19 @@ var schema = "migrate_driver_pgx"
 // TestMigrate runs some additional tests on Migrate().
 // Basic testing is already done in migrate/migrate_test.go
 func TestMigrate(t *testing.T) {
-	conn, driverURL := testutil.MustInitPgx(t, schema)
+	conn := Conn(testutil.MustInitPgx(t, schema))
 	defer conn.Close()
 
 	d := New("")
-	if err := d.Initialize(driverURL); err != nil {
+	if err := d.EnsureVersionTable(conn); err != nil {
 		t.Fatal(err)
 	}
 
-	files := []file.File{
+	files := []*file.File{
 		{
 			Path:      "/foobar",
 			FileName:  "001_foobar.up.sql",
-			Version:   1,
+			Version:   file.Version{Major: 0, Minor: 1},
 			Name:      "foobar",
 			Direction: direction.Up,
 			Content: []byte(`
@@ -38,7 +38,7 @@ func TestMigrate(t *testing.T) {
 		{
 			Path:      "/foobar",
 			FileName:  "002_foobar.down.sql",
-			Version:   1,
+			Version:   file.Version{Major: 0, Minor: 2},
 			Name:      "foobar",
 			Direction: direction.Down,
 			Content: []byte(`
@@ -48,7 +48,7 @@ func TestMigrate(t *testing.T) {
 		{
 			Path:      "/foobar",
 			FileName:  "002_foobar.up.sql",
-			Version:   2,
+			Version:   file.Version{Major: 0, Minor: 2},
 			Name:      "foobar",
 			Direction: direction.Up,
 			Content: []byte(`
@@ -60,7 +60,7 @@ func TestMigrate(t *testing.T) {
 	}
 
 	pipe := pipep.New()
-	tx, err := d.Begin()
+	tx, err := conn.Begin()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,9 +69,12 @@ func TestMigrate(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatal(errs)
 	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 
 	pipe = pipep.New()
-	tx, err = d.Begin()
+	tx, err = conn.Begin()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,9 +83,12 @@ func TestMigrate(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatal(errs)
 	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 
 	pipe = pipep.New()
-	tx, err = d.Begin()
+	tx, err = conn.Begin()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,8 +97,7 @@ func TestMigrate(t *testing.T) {
 	if len(errs) == 0 {
 		t.Error("Expected test case to fail")
 	}
-
-	if err := d.Close(); err != nil {
+	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
 }
