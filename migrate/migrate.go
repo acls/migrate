@@ -3,8 +3,9 @@
 package migrate
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"os/signal"
 	"path"
@@ -30,23 +31,31 @@ type Migrator struct {
 	Interrupts bool
 	// Don't validate base upfiles
 	Force bool
+	// Schema to use, if set
+	Schema string
 }
 
 func (m *Migrator) init(conn driver.Conn, validate bool) (prevFiles, files file.MigrationFiles, version file.Version, err error) {
-	if err = m.Driver.EnsureVersionTable(conn); err != nil {
+	revert, err := m.Driver.SearchPath(conn, m.Schema)
+	if err != nil {
+		return
+	}
+	defer revert()
+
+	if err = m.Driver.EnsureVersionTable(conn, m.Schema); err != nil {
 		return
 	}
 
 	// only read files if prev path exists
 	if m.PrevPath != "" {
 		if _, e := os.Stat(m.PrevPath); !os.IsNotExist(e) {
-			prevFiles, err = file.ReadMigrationFiles(m.PrevPath, file.FilenameRegex(m.Driver.FilenameExtension()))
+			prevFiles, err = file.ReadMigrationFiles(m.PrevPath, m.Driver.FilenameExtension())
 			if err != nil {
 				return
 			}
 		}
 	}
-	files, err = file.ReadMigrationFiles(m.Path, file.FilenameRegex(m.Driver.FilenameExtension()))
+	files, err = file.ReadMigrationFiles(m.Path, m.Driver.FilenameExtension())
 	if err != nil {
 		return
 	}
@@ -79,13 +88,10 @@ func (m *Migrator) Up(pipe chan interface{}, conn driver.Conn) {
 		go pipep.Close(pipe, err)
 		return
 	}
-
-	applyMigrations, err := files.ToLastFrom(version)
-	if err != nil {
-		go pipep.Close(pipe, err)
-		return
-	}
-
+	m.up(pipe, conn, files, version)
+}
+func (m *Migrator) up(pipe chan interface{}, conn driver.Conn, files file.MigrationFiles, version file.Version) {
+	applyMigrations := files.ToLastFrom(version)
 	m.MigrateFiles(pipe, conn, files, applyMigrations)
 }
 
@@ -105,12 +111,7 @@ func (m *Migrator) Down(pipe chan interface{}, conn driver.Conn) {
 		return
 	}
 
-	applyMigrations, err := files.ToFirstFrom(version)
-	if err != nil {
-		go pipep.Close(pipe, err)
-		return
-	}
-
+	applyMigrations := files.ToFirstFrom(version)
 	m.MigrateFiles(pipe, conn, files, applyMigrations)
 }
 
@@ -164,23 +165,34 @@ func (m *Migrator) ResetSync(conn driver.Conn) (errs []error) {
 
 // MigrateBetween migrates to the destination version
 func (m *Migrator) MigrateBetween(pipe chan interface{}, conn driver.Conn) (curVersion, dstVersion file.Version) {
-	prevFiles, files, version, err := m.init(conn, false)
+	prevFiles, files, version, err := m.init(conn, !m.Force)
 	if err != nil {
 		go pipep.Close(pipe, err)
 		return
 	}
 
-	curVersion, dstVersion, applyMigrations, err := files.Between(prevFiles, m.Force)
-	if err != nil {
-		go pipep.Close(pipe, err)
-		return
-	}
-
-	if curVersion.Compare(file.Version{}) != 0 &&
-		// version.Compare(file.Version{}) != 0 &&
-		curVersion.Compare(version) != 0 {
-		go pipep.Close(pipe, fmt.Errorf("Database version(%v) doesn't match current migration files version(%v) PrevPath:%s", version, curVersion, m.PrevPath))
-		return
+	var applyMigrations file.Migrations
+	if len(prevFiles) == 0 {
+		// no previous files so just migrate up or down depending on versions
+		sort.Sort(files) // make sure LastVersion is correct
+		curVersion = version
+		dstVersion = files.LastVersion()
+		if curVersion.Compare(dstVersion) <= 0 { // migrate up
+			applyMigrations = files.ToLastFrom(curVersion)
+		} else { // migrate down
+			applyMigrations = files.DownTo(dstVersion)
+		}
+	} else {
+		// migrate between previous files and current files
+		curVersion, dstVersion, applyMigrations, err = files.Between(prevFiles, m.Force)
+		if err != nil {
+			go pipep.Close(pipe, err)
+			return
+		}
+		if curVersion.Compare(version) != 0 {
+			go pipep.Close(pipe, fmt.Errorf("Database version(%v) doesn't match current migration files version(%v) PrevPath:%s", version, curVersion, m.PrevPath))
+			return
+		}
 	}
 
 	m.MigrateFiles(pipe, conn, files, applyMigrations)
@@ -233,11 +245,7 @@ func (m *Migrator) Migrate(pipe chan interface{}, conn driver.Conn, relativeN in
 		return
 	}
 
-	applyMigrations, err := files.From(version, relativeN)
-	if err != nil {
-		go pipep.Close(pipe, err)
-		return
-	}
+	applyMigrations := files.From(version, relativeN)
 
 	if relativeN == 0 {
 		applyMigrations = nil
@@ -257,12 +265,12 @@ func (m *Migrator) MigrateSync(conn driver.Conn, relativeN int) (errs []error) {
 // Create creates new migration files on disk
 func (m *Migrator) Create(incMajor bool, name string, contents ...string) (*file.MigrationFile, error) {
 	migrationsPath := m.Path
-	files, err := file.ReadMigrationFiles(migrationsPath, file.FilenameRegex(m.Driver.FilenameExtension()))
+	files, err := file.ReadMigrationFiles(migrationsPath, m.Driver.FilenameExtension())
 	if err != nil {
 		return nil, err
 	}
 
-	version := file.Version{}
+	version := file.NewVersion2(0, 0)
 	if len(files) > 0 {
 		lastFile := files[len(files)-1]
 		version = lastFile.Version
@@ -281,21 +289,18 @@ func (m *Migrator) Create(incMajor bool, name string, contents ...string) (*file
 		downContent = contents[1]
 	}
 
-	migrationsPath = path.Join(migrationsPath, version.MajorString())
-	os.MkdirAll(migrationsPath, 0700)
-
 	minorStr := version.MinorString()
 	mfile := &file.MigrationFile{
 		Version: version,
 		UpFile: &file.File{
-			Path:      migrationsPath,
+			Version:   version,
 			FileName:  fmt.Sprintf(filenamef, minorStr, name, "up", m.Driver.FilenameExtension()),
 			Name:      name,
 			Content:   []byte(upContent),
 			Direction: direction.Up,
 		},
 		DownFile: &file.File{
-			Path:      migrationsPath,
+			Version:   version,
 			FileName:  fmt.Sprintf(filenamef, minorStr, name, "down", m.Driver.FilenameExtension()),
 			Name:      name,
 			Content:   []byte(downContent),
@@ -303,10 +308,7 @@ func (m *Migrator) Create(incMajor bool, name string, contents ...string) (*file
 		},
 	}
 
-	if err := ioutil.WriteFile(path.Join(mfile.UpFile.Path, mfile.UpFile.FileName), mfile.UpFile.Content, 0644); err != nil {
-		return nil, err
-	}
-	if err := ioutil.WriteFile(path.Join(mfile.DownFile.Path, mfile.DownFile.FileName), mfile.DownFile.Content, 0644); err != nil {
+	if err := mfile.WriteFiles(migrationsPath); err != nil {
 		return nil, err
 	}
 
@@ -330,10 +332,6 @@ func (m *Migrator) MigrateFiles(pipe chan interface{}, conn driver.Conn, files f
 }
 
 func (m *Migrator) migrateFiles(pipe chan interface{}, conn driver.Conn, files file.MigrationFiles, applyMigrations file.Migrations) error {
-	if len(applyMigrations) == 0 {
-		return nil
-	}
-
 	var (
 		commitDir   = m.PrevPath
 		txFiles     file.Migrations
@@ -342,21 +340,50 @@ func (m *Migrator) migrateFiles(pipe chan interface{}, conn driver.Conn, files f
 		prevVersion file.Version
 	)
 
-	first := applyMigrations[0]
-	if commitDir != "" && first.Up() {
-		// if migrating up, (re)write prev files that should already exist
+	writeUpFiles := func(stopAt file.Version) error {
 		sort.Sort(files)
 		for _, f := range files {
-			if f.Compare(first.Version) >= 0 {
+			if f.Compare(stopAt) >= 0 {
 				break
 			}
-			f.UpFile.Direction = 0
+			f.UpFile.Direction = 0 // change console output
 			pipe <- f.UpFile
 			if err := f.WriteFiles(commitDir); err != nil {
 				return err
 			}
 		}
+		return nil
 	}
+
+	if len(applyMigrations) == 0 {
+		// write all files if dir doesn't exist
+		if commitDir != "" {
+			_, err := os.Stat(commitDir)
+			exists := err == nil || !os.IsNotExist(err)
+			if !exists {
+				return writeUpFiles(files.LastVersion().Inc(true))
+			}
+		}
+		// no migrations to apply
+		return nil
+	}
+
+	first := applyMigrations[0]
+	if commitDir != "" && first.Up() {
+		// if migrating up, remove files then write new
+		if err := file.RemoveContents(commitDir); err != nil {
+			return err
+		}
+		if err := writeUpFiles(first.Version); err != nil {
+			return err
+		}
+	}
+
+	revert, err := m.Driver.SearchPath(conn, m.Schema)
+	if err != nil {
+		return err
+	}
+	defer revert()
 
 	commit := func() error {
 		// commit transaction
@@ -380,7 +407,7 @@ func (m *Migrator) migrateFiles(pipe chan interface{}, conn driver.Conn, files f
 	for _, f := range applyMigrations {
 		// fmt.Println("f", f)
 		// commit if per file or major version changed
-		if tx != nil && (txPerFile || prevVersion.Major != f.Major) {
+		if tx != nil && (txPerFile || prevVersion.Major() != f.Major()) {
 			if err := commit(); err != nil {
 				return err
 			}
@@ -421,4 +448,152 @@ func (m *Migrator) handleInterrupts() chan os.Signal {
 		return c
 	}
 	return nil
+}
+
+// Up applies all available migrations
+func (m *Migrator) Version(conn driver.Conn) (version file.Version, err error) {
+	revert, err := m.Driver.SearchPath(conn, m.Schema)
+	if err != nil {
+		return
+	}
+	defer revert()
+	return m.Driver.Version(conn)
+}
+
+const SchemaDir = "schema/"
+
+// DumpSync is synchronous version of Dump
+func (m *Migrator) DumpSync(conn driver.CopyConn, dw file.DumpWriter) (errs []error) {
+	pipe := pipep.New()
+	go m.Dump(pipe, conn, dw)
+	errs = pipep.ReadErrors(pipe)
+	return
+}
+func (m *Migrator) Dump(pipe chan interface{}, conn driver.CopyConn, dw file.DumpWriter) {
+	var err error
+	defer func() {
+		go pipep.Close(pipe, err)
+	}()
+
+	revert, err := m.Driver.SearchPath(conn, m.Schema)
+	if err != nil {
+		return
+	}
+	defer revert()
+
+	dd, ok := m.Driver.(driver.DumpDriver)
+	if !ok {
+		err = errors.New("Driver must be a DumpDriver")
+		return
+	}
+
+	// get previous files
+	prevFiles, err := file.ReadMigrationFiles(m.PrevPath, m.Driver.FilenameExtension())
+	if err != nil {
+		return
+	}
+
+	// validate version and files match
+	version, err := m.Driver.Version(conn)
+	if err != nil {
+		return
+	}
+	lastVersion := prevFiles.LastVersion()
+	if lastVersion.Compare(version) != 0 {
+		err = fmt.Errorf("Last file version %v doesn't match current database version %v", lastVersion, version)
+		return
+	}
+
+	// write schema files
+	getWriter := func(dir, name string) (io.WriteCloser, error) {
+		// insert 'schema' dir into path
+		return dw.Writer(path.Join(SchemaDir, dir), name)
+	}
+	for _, f := range prevFiles {
+		err = f.WriteFileContents(getWriter, true)
+		if err != nil {
+			return
+		}
+	}
+
+	// write table data
+	pipe1 := pipep.New()
+	go dd.Dump(conn, dw, m.Schema, pipe1, m.handleInterrupts)
+	if ok := pipep.WaitAndRedirect(pipe1, pipe, m.handleInterrupts()); !ok {
+		return
+	}
+}
+
+// RestoreSync is synchronous version of Restore
+func (m *Migrator) RestoreSync(conn driver.CopyConn, dr file.DumpReader) (errs []error) {
+	pipe := pipep.New()
+	go m.Restore(pipe, conn, dr)
+	errs = pipep.ReadErrors(pipe)
+	return
+}
+func (m *Migrator) Restore(pipe chan interface{}, conn driver.CopyConn, dr file.DumpReader) {
+	var err error
+	defer func() {
+		go pipep.Close(pipe, err)
+	}()
+
+	dd, ok := m.Driver.(driver.DumpDriver)
+	if !ok {
+		err = errors.New("Driver must be a DumpDriver")
+		return
+	}
+
+	schema := m.Schema
+	if schema == "" {
+		schema = "public"
+	}
+
+	revert, err := dd.SearchPath(conn, schema)
+	if err != nil {
+		return
+	}
+	defer revert()
+
+	if m.Force {
+		if err = dd.DeleteSchema(conn, schema); err != nil {
+			return
+		}
+	}
+	if err = dd.EnsureVersionTable(conn, schema); err != nil {
+		return
+	}
+
+	{ // migrate up using schema read from DumpReader
+		var openers file.Openers
+		openers, err = dr.Files(SchemaDir)
+		if err != nil {
+			return
+		}
+		var files file.MigrationFiles
+		files, err = file.GetMigrationFiles(openers, m.Driver.FilenameExtension())
+		if err != nil {
+			return
+		}
+		if len(files) == 0 {
+			err = errors.New("Missing migration files")
+			return
+		}
+		pipe1 := pipep.New()
+		go m.up(pipe1, conn, files, file.NewVersion2(0, 0))
+		if ok := pipep.WaitAndRedirect(pipe1, pipe, m.handleInterrupts()); !ok {
+			return
+		}
+	}
+
+	if err = dd.TruncateTables(conn, schema); err != nil {
+		return
+	}
+
+	{ // restore data
+		pipe1 := pipep.New()
+		go dd.Restore(conn, dr, schema, pipe1, m.handleInterrupts)
+		if ok := pipep.WaitAndRedirect(pipe1, pipe, m.handleInterrupts()); !ok {
+			return
+		}
+	}
 }

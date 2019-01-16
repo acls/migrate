@@ -14,19 +14,20 @@ var schema = "migrate_driver_pgx"
 // TestMigrate runs some additional tests on Migrate().
 // Basic testing is already done in migrate/migrate_test.go
 func TestMigrate(t *testing.T) {
+	file.V2 = true
+
 	conn := Conn(testutil.MustInitPgx(t, schema))
 	defer conn.Close()
 
 	d := New("")
-	if err := d.EnsureVersionTable(conn); err != nil {
+	if err := d.EnsureVersionTable(conn, schema); err != nil {
 		t.Fatal(err)
 	}
 
 	files := []*file.File{
 		{
-			Path:      "/foobar",
 			FileName:  "001_foobar.up.sql",
-			Version:   file.Version{Major: 0, Minor: 1},
+			Version:   file.NewVersion2(0, 1),
 			Name:      "foobar",
 			Direction: direction.Up,
 			Content: []byte(`
@@ -36,9 +37,8 @@ func TestMigrate(t *testing.T) {
 			`),
 		},
 		{
-			Path:      "/foobar",
 			FileName:  "002_foobar.down.sql",
-			Version:   file.Version{Major: 0, Minor: 2},
+			Version:   file.NewVersion2(0, 2),
 			Name:      "foobar",
 			Direction: direction.Down,
 			Content: []byte(`
@@ -46,9 +46,8 @@ func TestMigrate(t *testing.T) {
 			`),
 		},
 		{
-			Path:      "/foobar",
 			FileName:  "002_foobar.up.sql",
-			Version:   file.Version{Major: 0, Minor: 2},
+			Version:   file.NewVersion2(0, 2),
 			Name:      "foobar",
 			Direction: direction.Up,
 			Content: []byte(`

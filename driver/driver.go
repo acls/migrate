@@ -2,6 +2,9 @@
 package driver
 
 import (
+	"io"
+	"os"
+
 	"github.com/acls/migrate/file"
 )
 
@@ -15,11 +18,16 @@ type RowQueryer interface {
 	QueryRow(query string, args ...interface{}) Scanner
 }
 
+// Queryer defines a database that can perform queries.
+type Queryer interface {
+	Query(query string, args ...interface{}) (RowsScanner, error)
+}
+
 // Databaser interface
 type Databaser interface {
 	Execer
-	Query(query string, args ...interface{}) (RowsScanner, error)
 	RowQueryer
+	Queryer
 }
 
 // Beginner defines a database that can begin a transaction.
@@ -32,6 +40,18 @@ type Conn interface {
 	Databaser
 	Beginner
 	Close() error
+}
+
+// CopyConn interface
+type CopyConn interface {
+	Copy
+	Conn
+}
+
+// Copy interface
+type Copy interface {
+	CopyToWriter(w io.Writer, sql string, args ...interface{}) error
+	CopyFromReader(r io.Reader, sql string, args ...interface{}) error
 }
 
 // Tx interface
@@ -59,10 +79,13 @@ type Scanner interface {
 // Driver is the interface type that needs to implemented by all drivers.
 type Driver interface {
 	// Creates and returns a connection
-	NewConn(url string) (conn Conn, err error)
+	NewConn(url, searchPath string) (conn Conn, err error)
+
+	// SearchPath sets the search path and returns a func that reverts the change
+	SearchPath(conn Conn, newSearchPath string) (revert func() error, err error)
 
 	// Ensure the version table exists
-	EnsureVersionTable(db Beginner) (err error)
+	EnsureVersionTable(db Beginner, schema string) (err error)
 
 	// FilenameExtension returns the extension of the migration files.
 	// The returned string must not begin with a dot.
@@ -79,4 +102,14 @@ type Driver interface {
 
 	// Version returns the current migration version.
 	Version(db RowQueryer) (version file.Version, err error)
+}
+
+// DumpDriver interface
+type DumpDriver interface {
+	Driver
+	NewCopyConn(url, searchPath string) (conn CopyConn, err error)
+	Dump(conn CopyConn, dw file.DumpWriter, schema string, pipe chan interface{}, handleInterrupts func() chan os.Signal)
+	Restore(conn CopyConn, dr file.DumpReader, schema string, pipe chan interface{}, handleInterrupts func() chan os.Signal)
+	DeleteSchema(db Execer, schema string) error
+	TruncateTables(db Conn, schema string) error
 }

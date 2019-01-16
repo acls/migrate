@@ -11,30 +11,32 @@ import (
 
 func TestParseFilenameSchema(t *testing.T) {
 	var tests = []struct {
+		isV2              bool
 		filename          string
 		filenameExtension string
+		expectMajor       uint64
 		expectVersion     uint64
 		expectName        string
 		expectDirection   direction.Direction
 		expectErr         bool
 	}{
-		{"001_test_file.up.sql", "sql", 1, "test_file", direction.Up, false},
-		{"001_test_file.down.sql", "sql", 1, "test_file", direction.Down, false},
-		{"10034_test_file.down.sql", "sql", 10034, "test_file", direction.Down, false},
-		{"-1_test_file.down.sql", "sql", 0, "", direction.Up, true},
-		{"test_file.down.sql", "sql", 0, "", direction.Up, true},
-		{"100_test_file.down", "sql", 0, "", direction.Up, true},
-		{"100_test_file.sql", "sql", 0, "", direction.Up, true},
-		{"100_test_file", "sql", 0, "", direction.Up, true},
-		{"test_file", "sql", 0, "", direction.Up, true},
-		{"100", "sql", 0, "", direction.Up, true},
-		{".sql", "sql", 0, "", direction.Up, true},
-		{"up.sql", "sql", 0, "", direction.Up, true},
-		{"down.sql", "sql", 0, "", direction.Up, true},
+		{false, "001_test_file.up.sql", "sql", 0, 1, "test_file", direction.Up, false},
+		{false, "001_test_file.down.sql", "sql", 0, 1, "test_file", direction.Down, false},
+		{false, "10034_test_file.down.sql", "sql", 0, 10034, "test_file", direction.Down, false},
+		{false, "-1_test_file.down.sql", "sql", 0, 0, "", direction.Up, true},
+		{false, "test_file.down.sql", "sql", 0, 0, "", direction.Up, true},
+		{false, "100_test_file.down", "sql", 0, 0, "", direction.Up, true},
+		{false, "100_test_file.sql", "sql", 0, 0, "", direction.Up, true},
+		{false, "100_test_file", "sql", 0, 0, "", direction.Up, true},
+		{false, "test_file", "sql", 0, 0, "", direction.Up, true},
+		{false, "100", "sql", 0, 0, "", direction.Up, true},
+		{false, ".sql", "sql", 0, 0, "", direction.Up, true},
+		{false, "up.sql", "sql", 0, 0, "", direction.Up, true},
+		{false, "down.sql", "sql", 0, 0, "", direction.Up, true},
 	}
 
 	for _, test := range tests {
-		version, name, migrate, err := parseFilenameSchema(test.filename, FilenameRegex(test.filenameExtension))
+		major, version, name, migrate, err := parseFilenameSchema(test.isV2, test.filename, test.filenameExtension)
 		if test.expectErr && err == nil {
 			t.Fatal("Expected error, but got none.", test)
 		}
@@ -42,6 +44,9 @@ func TestParseFilenameSchema(t *testing.T) {
 			t.Fatal("Did not expect error, but got one:", err, test)
 		}
 		if err == nil {
+			if major != test.expectMajor {
+				t.Error("Wrong major number", test)
+			}
 			if version != test.expectVersion {
 				t.Error("Wrong version number", test)
 			}
@@ -55,7 +60,9 @@ func TestParseFilenameSchema(t *testing.T) {
 	}
 }
 
-func TestXFiles(t *testing.T) {
+func TestFiles(t *testing.T) {
+	V2 = true
+
 	tmpdir, err := ioutil.TempDir("/tmp", "TestLookForMigrationFilesInSearchPath")
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +73,7 @@ func TestXFiles(t *testing.T) {
 		t.Fatal("Unable to write files in tmpdir", err)
 	}
 
-	majorDir := Version{}.MajorString()
+	majorDir := NewVersion2(0, 0).MajorString()
 	os.Mkdir(path.Join(tmpdir, majorDir), 0700)
 
 	ioutil.WriteFile(path.Join(tmpdir, majorDir, "002_migrationfile.up.sql"), nil, 0755)
@@ -84,7 +91,7 @@ func TestXFiles(t *testing.T) {
 	ioutil.WriteFile(path.Join(tmpdir, majorDir, "401_migrationfile.up.sql"), nil, 0755)
 	ioutil.WriteFile(path.Join(tmpdir, majorDir, "401_migrationfile.down.sql"), []byte("test"), 0755)
 
-	majorDir = Version{Major: 1}.MajorString()
+	majorDir = NewVersion2(1, 0).MajorString()
 	os.Mkdir(path.Join(tmpdir, majorDir), 0700)
 
 	ioutil.WriteFile(path.Join(tmpdir, majorDir, "001_migrationfile.up.sql"), nil, 0755)
@@ -93,7 +100,7 @@ func TestXFiles(t *testing.T) {
 	ioutil.WriteFile(path.Join(tmpdir, majorDir, "401_migrationfile.up.sql"), nil, 0755)
 	ioutil.WriteFile(path.Join(tmpdir, majorDir, "401_migrationfile.down.sql"), []byte("test"), 0755)
 
-	files, err := ReadMigrationFiles(tmpdir, FilenameRegex("sql"))
+	files, err := ReadMigrationFiles(tmpdir, "sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,17 +110,17 @@ func TestXFiles(t *testing.T) {
 	}
 
 	wantedOrder := []Version{
-		{0, 1},
-		{0, 2},
-		{0, 101},
-		{0, 301},
-		{0, 401},
-		{1, 1},
-		{1, 401},
+		NewVersion2(0, 1),
+		NewVersion2(0, 2),
+		NewVersion2(0, 101),
+		NewVersion2(0, 301),
+		NewVersion2(0, 401),
+		NewVersion2(1, 1),
+		NewVersion2(1, 401),
 	}
 
 	if len(files) != len(wantedOrder) {
-		t.Fatal("Wrong number of files returned.")
+		t.Fatalf("Wrong number of files returned. Got %d, wanted %d", len(files), len(wantedOrder))
 	}
 
 	// test sort order
@@ -149,20 +156,17 @@ func TestXFiles(t *testing.T) {
 		relative    int
 		expectRange []Version
 	}{
-		{Version{0, 0}, 2, []Version{{0, 1}, {0, 2}}},
-		{Version{0, 1}, 4, []Version{{0, 2}, {0, 101}, {0, 301}, {0, 401}}},
-		{Version{0, 1}, 0, nil},
-		{Version{0, 0}, 1, []Version{{0, 1}}},
-		{Version{0, 0}, 0, nil},
-		{Version{0, 101}, -2, []Version{{0, 101}, {0, 2}}},
-		{Version{0, 401}, -1, []Version{{0, 401}}},
+		{NewVersion2(0, 0), 2, []Version{NewVersion2(0, 1), NewVersion2(0, 2)}},
+		{NewVersion2(0, 1), 4, []Version{NewVersion2(0, 2), NewVersion2(0, 101), NewVersion2(0, 301), NewVersion2(0, 401)}},
+		{NewVersion2(0, 1), 0, nil},
+		{NewVersion2(0, 0), 1, []Version{NewVersion2(0, 1)}},
+		{NewVersion2(0, 0), 0, nil},
+		{NewVersion2(0, 101), -2, []Version{NewVersion2(0, 101), NewVersion2(0, 2)}},
+		{NewVersion2(0, 401), -1, []Version{NewVersion2(0, 401)}},
 	}
 
 	for _, test := range tests {
-		rangeFiles, err := files.From(test.from, test.relative)
-		if err != nil {
-			t.Error("Unable to fetch range:", err)
-		}
+		rangeFiles := files.From(test.from, test.relative)
 		if len(rangeFiles) != len(test.expectRange) {
 			t.Fatalf("file.From(): expected %v files, got %v. For test %v.", len(test.expectRange), len(rangeFiles), test.expectRange)
 		}
@@ -175,10 +179,7 @@ func TestXFiles(t *testing.T) {
 	}
 
 	// test ToFirstFrom
-	tffFiles, err := files.ToFirstFrom(Version{1, 401})
-	if err != nil {
-		t.Fatal(err)
-	}
+	tffFiles := files.ToFirstFrom(NewVersion2(1, 401))
 	if len(tffFiles) != len(wantedOrder) {
 		t.Fatalf("Wrong number of files returned by ToFirstFrom(), expected %v, got %v.", len(wantedOrder), len(tffFiles))
 	}
@@ -187,10 +188,7 @@ func TestXFiles(t *testing.T) {
 	}
 
 	// test ToLastFrom
-	tofFiles, err := files.ToLastFrom(Version{0, 0})
-	if err != nil {
-		t.Fatal(err)
-	}
+	tofFiles := files.ToLastFrom(NewVersion2(0, 0))
 	if len(tofFiles) != len(wantedOrder) {
 		t.Fatalf("Wrong number of files returned by ToLastFrom(), expected %v, got %v.", len(wantedOrder), len(tofFiles))
 	}
@@ -212,7 +210,7 @@ func TestDuplicateFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = ReadMigrationFiles(root, FilenameRegex("sql"))
+	_, err = ReadMigrationFiles(root, "sql")
 	if err == nil {
 		t.Fatal("Expected duplicate migration file error")
 	}

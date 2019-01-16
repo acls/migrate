@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"strconv"
 	"time"
 
@@ -24,7 +25,6 @@ const Version string = "2.0.0"
 
 func main() {
 	m := &migrate.Migrator{
-		Driver:     mpgx.New(""),
 		Interrupts: true,
 	}
 
@@ -33,11 +33,16 @@ func main() {
 	flag.StringVar(&m.Path, "path", os.Getenv("SCHEMA_DIR"), "")
 	flag.StringVar(&m.PrevPath, "prev", os.Getenv("PREV_SCHEMA_DIR"), "")
 	flag.BoolVar(&m.TxPerFile, "perfile", false, "")
+	flag.BoolVar(&file.V2, "v2", false, "")
 	flag.BoolVar(&m.Force, "force", false, "")
+	flag.StringVar(&m.Schema, "schema", "", "")
 	var incMajor bool
 	flag.BoolVar(&incMajor, "major", false, "")
 	var version bool
 	flag.BoolVar(&version, "version", false, "")
+
+	var dumpDir string
+	flag.StringVar(&dumpDir, "dump", "./dump", "")
 
 	flag.Usage = func() {
 		printHelp()
@@ -55,17 +60,26 @@ func main() {
 		os.Exit(0)
 	}
 
-	conn, err := m.Driver.NewConn(url)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+	m.Driver = mpgx.New("")
 
 	if m.Path == "" {
 		m.Path, _ = os.Getwd()
+		m.Path = path.Join(m.Path, "schema")
 	}
 	if m.PrevPath == "" {
 		m.PrevPath = m.Path + "-prev"
+	}
+
+	switch command {
+	case "dump", "restore":
+		runDumpRestore(m, url, dumpDir, command)
+		os.Exit(0)
+	}
+
+	conn, err := m.Driver.NewConn(url, m.Schema)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
 	}
 
 	switch command {
@@ -94,6 +108,61 @@ func main() {
 		os.Exit(0)
 	}
 }
+
+func runDumpRestore(m *migrate.Migrator, url, dumpDir, command string) {
+	timerStart := time.Now()
+	pipe := pipep.New()
+
+	if dumpDir == "" {
+		fmt.Println("Please specify an output directory to dump to/from (-dump=)")
+		os.Exit(1)
+	}
+
+	empty, err := file.IsEmpty(dumpDir)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	conn, err := m.Driver.(driver.DumpDriver).NewCopyConn(url, m.Schema)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	switch command {
+	default: // "dump"
+		// check if dir is empty or not
+		if !m.Force && !empty {
+			fmt.Println("Dump dir must be empty or -force must be set")
+			os.Exit(1)
+		}
+		// empty dir
+		// if m.Force {
+		if err = file.RemoveContents(dumpDir); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		go m.Dump(pipe, conn, &file.DirWriter{BaseDir: dumpDir})
+	case "restore":
+		if empty {
+			fmt.Println("Can't restore empty dump dir")
+			os.Exit(1)
+		}
+		// fmt.Println("m.Path1", m.Path)
+		// // set migration Path to dumped schema dir
+		// m.Path = path.Join(dumpDir, migrate.SchemaDir)
+		// fmt.Println("m.Path2", m.Path)
+		go m.Restore(pipe, conn, &file.DirReader{BaseDir: dumpDir})
+	}
+
+	ok := writePipe(pipe)
+	printComplete(m, conn, timerStart)
+	if !ok {
+		os.Exit(1)
+	}
+}
+
 func runMigration(m *migrate.Migrator, conn driver.Conn, command string) {
 	timerStart := time.Now()
 	pipe := pipep.New()
@@ -118,8 +187,8 @@ func runMigration(m *migrate.Migrator, conn driver.Conn, command string) {
 		}
 		go m.MigrateBetween(pipe, conn)
 	case "goto":
-		var toVersion file.Version
-		if err := toVersion.Parse(flag.Arg(1)); err != nil {
+		toVersion, err := file.ParseVersion(flag.Arg(1))
+		if err != nil {
 			fmt.Println("Unable to parse param <v>.", err)
 			os.Exit(1)
 		}
@@ -175,7 +244,11 @@ func writePipe(pipe chan interface{}) (ok bool) {
 							c = color.New(color.FgBlack)
 							d = "-"
 						}
-						c.Printf("%s %v/%s\n", d, f.MajorString(), f.FileName)
+						if file.V2 {
+							c.Printf("%s %v/%s\n", d, f.MajorString(), f.FileName)
+						} else {
+							c.Printf("%s %s\n", d, f.FileName)
+						}
 
 					default:
 						text := fmt.Sprint(item)
@@ -231,10 +304,11 @@ Commands:
    help           Show this help
 
 '-version'  Print version then exit.
-'-path'     Defaults to current working directory.
+'-path'     Defaults to ./schema.
 '-prev'     Directory to store migrated schemas. Defaults to <path>-prev.
 '-perfile'  Per file transaction. Defaults to one transaction per major version.
 '-major'    Increment major version. Applies to 'create' command.
 '-force'    Skips validation. Applies to 'between' command.
+'-v2'       Use version 2 which enables major versions. Warning: once you switch you can't go back.
 `)
 }
