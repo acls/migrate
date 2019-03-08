@@ -173,22 +173,34 @@ type Migration struct {
 	d             direction.Direction
 }
 
-func (m Migration) Up() bool {
+func (m *Migration) Up() bool {
 	return m.d != direction.Down
 }
 
-func (m Migration) File() *File {
+func (m *Migration) File() *File {
 	if m.Up() {
 		return m.migrationFile.UpFile
 	}
 	return m.migrationFile.DownFile
 }
-
-func (m Migration) Commit(prevDir string) error {
-	if m.d == direction.Down {
-		return m.migrationFile.DeleteFiles(prevDir)
+func (m *Migration) FileContent() (up, down []byte, err error) {
+	if up, err = m.UpContent(); err != nil {
+		return
 	}
-	return m.migrationFile.WriteFiles(prevDir)
+	down, err = m.DownContent()
+	return
+}
+
+func (m *Migration) UpContent() ([]byte, error) {
+	f := m.migrationFile.UpFile
+	err := f.ReadContent()
+	return f.Content, err
+}
+
+func (m *Migration) DownContent() ([]byte, error) {
+	f := m.migrationFile.DownFile
+	err := f.ReadContent()
+	return f.Content, err
 }
 
 // MigrationFile represents both the UP and the DOWN migration file.
@@ -222,13 +234,6 @@ func (mf MigrationFile) WriteFileContents(getWriter func(string, string) (io.Wri
 		return
 	}
 	return mf.DownFile.WriteContent(getWriter, release)
-}
-
-func (mf MigrationFile) DeleteFiles(prevDir string) (err error) {
-	if err = mf.UpFile.Delete(prevDir); err != nil {
-		return
-	}
-	return mf.DownFile.Delete(prevDir)
 }
 
 // MigrationFiles is a slice of MigrationFiles

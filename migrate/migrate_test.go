@@ -22,15 +22,13 @@ var schema = "migrate_migrate"
 
 func NewMigratorAndConn(t *testing.T, tmpdir string) (*Migrator, driver.Conn, func()) {
 	m := &Migrator{
-		Driver:   mpgx.New(""),
-		Path:     tmpdir,
-		PrevPath: tmpdir + "-prev",
-		Schema:   schema,
+		Driver: mpgx.New(""),
+		Path:   tmpdir,
+		Schema: schema,
 	}
 	return m, mpgx.Conn(testutil.MustInitPgx(t, schema)), func() {
 		// cleanup
 		os.RemoveAll(m.Path)
-		os.RemoveAll(m.PrevPath)
 	}
 }
 

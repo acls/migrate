@@ -21,7 +21,7 @@ import (
 	"github.com/fatih/color"
 )
 
-const Version string = "2.0.0"
+const Version string = "2.1.0"
 
 func main() {
 	m := &migrate.Migrator{
@@ -31,11 +31,10 @@ func main() {
 	var url string
 	flag.StringVar(&url, "url", os.Getenv("MIGRATE_URL"), "")
 	flag.StringVar(&m.Path, "path", os.Getenv("SCHEMA_DIR"), "")
-	flag.StringVar(&m.PrevPath, "prev", os.Getenv("PREV_SCHEMA_DIR"), "")
 	flag.BoolVar(&m.TxPerFile, "perfile", false, "")
 	flag.BoolVar(&file.V2, "v2", false, "")
 	flag.BoolVar(&m.Force, "force", false, "")
-	flag.StringVar(&m.Schema, "schema", "", "")
+	flag.StringVar(&m.Schema, "schema", "public", "")
 	var incMajor bool
 	flag.BoolVar(&incMajor, "major", false, "")
 	var version bool
@@ -65,9 +64,6 @@ func main() {
 	if m.Path == "" {
 		m.Path, _ = os.Getwd()
 		m.Path = path.Join(m.Path, "schema")
-	}
-	if m.PrevPath == "" {
-		m.PrevPath = m.Path + "-prev"
 	}
 
 	switch command {
@@ -181,10 +177,6 @@ func runMigration(m *migrate.Migrator, conn driver.Conn, command string) {
 		}
 		go m.Migrate(pipe, conn, relativeNInt)
 	case "between":
-		if m.PrevPath == m.Path {
-			fmt.Println("'-prev' must not be the same as '-path'")
-			os.Exit(1)
-		}
 		go m.MigrateBetween(pipe, conn)
 	case "goto":
 		toVersion, err := file.ParseVersion(flag.Arg(1))
@@ -229,29 +221,14 @@ func writePipe(pipe chan interface{}) (ok bool) {
 						c.Println(item.(error).Error())
 						okFlag = false
 
+					case *file.Migration:
+						f := item.(*file.Migration)
+						printFile(f.File())
 					case *file.File:
-						f := item.(*file.File)
-						var c *color.Color
-						var d string
-						switch f.Direction {
-						case direction.Up:
-							c = color.New(color.FgGreen)
-							d = ">"
-						case direction.Down:
-							c = color.New(color.FgBlue)
-							d = "<"
-						default:
-							c = color.New(color.FgBlack)
-							d = "-"
-						}
-						if file.V2 {
-							c.Printf("%s %v/%s\n", d, f.MajorString(), f.FileName)
-						} else {
-							c.Printf("%s %s\n", d, f.FileName)
-						}
+						printFile(item.(*file.File))
 
 					default:
-						text := fmt.Sprint(item)
+						text := fmt.Sprintf("%T: %v", item, item)
 						fmt.Println(text)
 					}
 				}
@@ -259,6 +236,26 @@ func writePipe(pipe chan interface{}) (ok bool) {
 		}
 	}
 	return okFlag
+}
+func printFile(f *file.File) {
+	var c *color.Color
+	var d string
+	switch f.Direction {
+	case direction.Up:
+		c = color.New(color.FgGreen)
+		d = ">"
+	case direction.Down:
+		c = color.New(color.FgBlue)
+		d = "<"
+	default:
+		c = color.New(color.FgBlack)
+		d = "-"
+	}
+	if file.V2 {
+		c.Printf("%s %v/%s\n", d, f.MajorString(), f.FileName)
+	} else {
+		c.Printf("%s %s\n", d, f.FileName)
+	}
 }
 
 func printComplete(m *migrate.Migrator, conn driver.Conn, timerStart time.Time) {
@@ -289,7 +286,7 @@ Schema Version: %s
 
 func printHelp() {
 	os.Stderr.WriteString(
-		`usage: migrate [-prev=<prev>] [-path=<path>] -url=<url> <command> [<args>]
+		`usage: migrate [-path=<path>] -url=<url> <command> [<args>]
 
 Commands:
    create <name>  Create a new migration
@@ -300,12 +297,11 @@ Commands:
    version        Show current migration version
    migrate <n>    Apply migrations -n|+n
    goto <v>       Migrate to version v
-   between        Migrates between '-prev' and '-path'
+   between        Migrates between '-path' and prev files stored in db
    help           Show this help
 
 '-version'  Print version then exit.
 '-path'     Defaults to ./schema.
-'-prev'     Directory to store migrated schemas. Defaults to <path>-prev.
 '-perfile'  Per file transaction. Defaults to one transaction per major version.
 '-major'    Increment major version. Applies to 'create' command.
 '-force'    Skips validation. Applies to 'between' command.

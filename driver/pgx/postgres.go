@@ -120,8 +120,24 @@ func (d *pgDriver) EnsureVersionTable(db driver.Beginner, schema string) (err er
 	}
 	return
 }
-func ensureVersionTableV1(db driver.Databaser, tbl string) error {
-	return db.Exec("CREATE TABLE IF NOT EXISTS " + tbl + " (version INT NOT NULL PRIMARY KEY);")
+func ensureVersionTableV1(db driver.Databaser, tbl string) (err error) {
+	sqlCommands := []string{
+		// initial create
+		"CREATE TABLE IF NOT EXISTS " + tbl + " (version INT NOT NULL PRIMARY KEY);",
+		// columns for file content
+		`ALTER TABLE ` + tbl + `
+			ADD COLUMN IF NOT EXISTS up_file TEXT,
+			ADD COLUMN IF NOT EXISTS down_file TEXT
+		`,
+		"UPDATE " + tbl + " SET up_file = '' WHERE up_file IS NULL",
+		"UPDATE " + tbl + " SET down_file = '' WHERE down_file IS NULL",
+	}
+	for _, sql := range sqlCommands {
+		if err = db.Exec(sql); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func ensureVersionTableV2(db driver.Databaser, tbl string) (err error) {
 	// skip if it has the major column already
@@ -197,22 +213,24 @@ func (d *pgDriver) TableName() string {
 	return d.tableName
 }
 
-func (d *pgDriver) Migrate(db driver.Databaser, f *file.File, pipe chan interface{}) {
+func (d *pgDriver) Migrate(db driver.Databaser, mf *file.Migration, pipe chan interface{}) {
 	defer close(pipe)
+	f := mf.File()
 	pipe <- f
 
-	var ok bool
-	if !file.V2 {
-		ok = d.updateSchemaTableV1(db, f, pipe)
-	} else {
-		ok = d.updateSchemaTableV2(db, f, pipe)
-	}
-	if !ok {
+	// read content from db before it can be deleted
+	if err := f.ReadContent(); err != nil {
+		pipe <- err
 		return
 	}
 
-	if err := f.ReadContent(); err != nil {
-		pipe <- err
+	var ok bool
+	if !file.V2 {
+		ok = d.migrateV1(db, mf, pipe)
+	} else {
+		ok = d.migrateV2(db, mf, pipe)
+	}
+	if !ok {
 		return
 	}
 
@@ -229,17 +247,21 @@ func (d *pgDriver) Migrate(db driver.Databaser, f *file.File, pipe chan interfac
 		} else {
 			pipe <- fmt.Errorf("%s %v: %s", pqErr.Severity, pqErr.Code, pqErr.Message)
 		}
-		return
 	}
 }
 
-func (d *pgDriver) updateSchemaTableV1(db driver.Databaser, f *file.File, pipe chan interface{}) bool {
-	if f.Direction == direction.Up {
-		if err := db.Exec("INSERT INTO "+d.tableName+" (version) VALUES ($1)", f.Minor()); err != nil {
+func (d *pgDriver) migrateV1(db driver.Databaser, f *file.Migration, pipe chan interface{}) bool {
+	if f.Up() {
+		up, down, err := f.FileContent()
+		if err != nil {
 			pipe <- err
 			return false
 		}
-	} else if f.Direction == direction.Down {
+		if err := db.Exec("INSERT INTO "+d.tableName+" (version,up_file,down_file) VALUES ($1,$2,$3)", f.Minor(), up, down); err != nil {
+			pipe <- err
+			return false
+		}
+	} else {
 		if err := db.Exec("DELETE FROM "+d.tableName+" WHERE version=$1", f.Minor()); err != nil {
 			pipe <- err
 			return false
@@ -248,8 +270,8 @@ func (d *pgDriver) updateSchemaTableV1(db driver.Databaser, f *file.File, pipe c
 	return true
 }
 
-func (d *pgDriver) updateSchemaTableV2(db driver.Databaser, f *file.File, pipe chan interface{}) bool {
-	if f.Direction == direction.Up {
+func (d *pgDriver) migrateV2(db driver.Databaser, f *file.Migration, pipe chan interface{}) bool {
+	if f.Up() {
 		prevVersion := f.Version
 		if !(f.Major() == 0 && f.Minor() <= 1) {
 			// all versions except first version
@@ -264,13 +286,18 @@ func (d *pgDriver) updateSchemaTableV2(db driver.Databaser, f *file.File, pipe c
 				return false
 			}
 		}
-		// foreign key ensures correct order
-		if err := db.Exec("INSERT INTO "+d.tableName+" (major,minor,prev_major,prev_minor) VALUES ($1,$2,$3,$4)",
-			f.Major(), f.Minor(), prevVersion.Major(), prevVersion.Minor()); err != nil {
+		up, down, err := f.FileContent()
+		if err != nil {
 			pipe <- err
 			return false
 		}
-	} else if f.Direction == direction.Down {
+		// foreign key ensures correct order
+		if err := db.Exec("INSERT INTO "+d.tableName+" (major,minor,prev_major,prev_minor,up_file,down_file) VALUES ($1,$2,$3,$4,$5,$6)",
+			f.Major(), f.Minor(), prevVersion.Major(), prevVersion.Minor(), up, down); err != nil {
+			pipe <- err
+			return false
+		}
+	} else {
 		if err := db.Exec("DELETE FROM "+d.tableName+" WHERE major=$1 AND minor=$2", f.Major(), f.Minor()); err != nil {
 			pipe <- err
 			return false
@@ -301,6 +328,104 @@ func (d *pgDriver) versionV2(db driver.RowQueryer) (file.Version, error) {
 	var major, minor uint64
 	err := db.QueryRow("SELECT major, minor FROM "+d.tableName+" ORDER BY major DESC, minor DESC LIMIT 1").Scan(&major, &minor)
 	return file.NewVersion2(major, minor), err
+}
+
+func (d *pgDriver) GetMigrationFiles(db driver.Databaser) (files file.MigrationFiles, err error) {
+	// query all versions in
+	columns := "0, version"
+	order := "version"
+	if file.V2 {
+		columns = "major, minor"
+		order = columns
+	}
+	rows, err := db.Query("SELECT " + columns + " FROM " + d.tableName + " ORDER BY " + order)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var major, minor uint64
+		if err = rows.Scan(&major, &minor); err != nil {
+			return
+		}
+		version := file.NewVersion2(major, minor)
+		files = append(files, file.MigrationFile{
+			Version: version,
+			UpFile: &file.File{
+				Version:   version,
+				Direction: direction.Up,
+				Name:      "-",
+				FileName:  version.MinorString() + "_-.up.sql",
+				Open: func() (io.ReadCloser, error) {
+					return d.readVersionContent(db, version, true)
+				},
+			},
+			DownFile: &file.File{
+				Version:   version,
+				Direction: direction.Down,
+				Name:      "-",
+				FileName:  version.MinorString() + "_-.down.sql",
+				Open: func() (io.ReadCloser, error) {
+					return d.readVersionContent(db, version, false)
+				},
+			},
+		})
+	}
+	return
+}
+func (d *pgDriver) readVersionContent(db driver.Databaser, version file.Version, up bool) (io.ReadCloser, error) {
+	// set column depending on direction
+	column := "down_file"
+	if up {
+		column = "up_file"
+	}
+	// set where depending on version
+	where := "0 = $1 AND version = $2"
+	if file.V2 {
+		where = "major = $1 AND minor = $2"
+	}
+	d.GetMigrationFiles(db)
+	// get content
+	var txt string
+	qry := "SELECT " + column + " FROM " + d.tableName + " WHERE " + where
+	err := db.QueryRow(qry, version.Major(), version.Minor()).Scan(&txt)
+	if err != nil {
+		panic(err)
+		return nil, err
+	}
+	// make text a ReadCLoser
+	return newVersionContentReader(txt), nil
+}
+
+type versionContentReader struct {
+	strings.Reader
+}
+
+func newVersionContentReader(txt string) io.ReadCloser {
+	return &versionContentReader{*strings.NewReader(txt)}
+}
+func (versionContentReader) Close() error {
+	return nil
+}
+
+func (d *pgDriver) UpdateFiles(db driver.Databaser, f *file.Migration, pipe chan interface{}) {
+	defer close(pipe)
+
+	up, down, err := f.FileContent()
+	if err != nil {
+		pipe <- err
+		return
+	}
+	// set where depending on version
+	where := "0 = $1 AND version = $2"
+	if file.V2 {
+		where = "major = $1 AND minor = $2"
+	}
+	if err := db.Exec("UPDATE "+d.tableName+" SET up_file=$3, down_file=$4 WHERE "+where, f.Major(), f.Minor(), up, down); err != nil {
+		pipe <- err
+	}
+	return
 }
 
 func (d *pgDriver) Dump(conn driver.CopyConn, dw file.DumpWriter, schema string, pipe chan interface{}, handleInterrupts func() chan os.Signal) {

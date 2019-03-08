@@ -98,10 +98,16 @@ type Driver interface {
 	// It will receive a file which the driver should apply
 	// to its backend or whatever. The migration function should use
 	// the pipe channel to return any errors or other useful information.
-	Migrate(db Databaser, file *file.File, pipe chan interface{})
+	Migrate(db Databaser, file *file.Migration, pipe chan interface{})
 
 	// Version returns the current migration version.
 	Version(db RowQueryer) (version file.Version, err error)
+
+	// GetMigrationFiles gets all migration files in the schema migrations table
+	GetMigrationFiles(db Databaser) (files file.MigrationFiles, err error)
+
+	// UpdateFiles updates the up and down file contents
+	UpdateFiles(db Databaser, file *file.Migration, pipe chan interface{})
 }
 
 // DumpDriver interface

@@ -24,37 +24,53 @@ func TestMigrate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files := []*file.File{
-		{
-			FileName:  "001_foobar.up.sql",
-			Version:   file.NewVersion2(0, 1),
-			Name:      "foobar",
-			Direction: direction.Up,
-			Content: []byte(`
-				CREATE TABLE yolo (
-					id serial not null primary key
-				);
-			`),
+	files := file.MigrationFiles{
+		file.MigrationFile{
+			Version: file.NewVersion2(0, 1),
+			UpFile: &file.File{
+				FileName:  "001_foobar.up.sql",
+				Version:   file.NewVersion2(0, 1),
+				Name:      "foobar",
+				Direction: direction.Up,
+				Content: []byte(`
+					CREATE TABLE yolo (
+						id serial not null primary key
+					);
+				`),
+			},
+			DownFile: &file.File{
+				FileName:  "001_foobar.down.sql",
+				Version:   file.NewVersion2(0, 1),
+				Name:      "foobar",
+				Direction: direction.Down,
+				Content: []byte(`
+					DROP TABLE yolo;
+				`),
+			},
 		},
-		{
-			FileName:  "002_foobar.down.sql",
-			Version:   file.NewVersion2(0, 2),
-			Name:      "foobar",
-			Direction: direction.Down,
-			Content: []byte(`
-				DROP TABLE yolo;
-			`),
-		},
-		{
-			FileName:  "002_foobar.up.sql",
-			Version:   file.NewVersion2(0, 2),
-			Name:      "foobar",
-			Direction: direction.Up,
-			Content: []byte(`
-				CREATE TABLE error (
-					id THIS WILL CAUSE AN ERROR
-				)
-			`),
+
+		file.MigrationFile{
+			Version: file.NewVersion2(0, 2),
+			UpFile: &file.File{
+				FileName:  "002_erroar.up.sql",
+				Version:   file.NewVersion2(0, 2),
+				Name:      "erroar",
+				Direction: direction.Up,
+				Content: []byte(`
+					CREATE TABLE error (
+						id THIS WILL CAUSE AN ERROAR
+					)
+				`),
+			},
+			DownFile: &file.File{
+				FileName:  "002_erroar.up.sql",
+				Version:   file.NewVersion2(0, 2),
+				Name:      "erroar",
+				Direction: direction.Up,
+				Content: []byte(`
+					MOAR ERROAR!
+				`),
+			},
 		},
 	}
 
@@ -63,7 +79,8 @@ func TestMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go d.Migrate(tx, files[0], pipe)
+	mf := files[0].Migration(direction.Up)
+	go d.Migrate(tx, &mf, pipe)
 	errs := pipep.ReadErrors(pipe)
 	if len(errs) > 0 {
 		t.Fatal(errs)
@@ -77,7 +94,8 @@ func TestMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go d.Migrate(tx, files[1], pipe)
+	mf = files[0].Migration(direction.Down)
+	go d.Migrate(tx, &mf, pipe)
 	errs = pipep.ReadErrors(pipe)
 	if len(errs) > 0 {
 		t.Fatal(errs)
@@ -91,7 +109,8 @@ func TestMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go d.Migrate(tx, files[2], pipe)
+	mf = files[1].Migration(direction.Up)
+	go d.Migrate(tx, &mf, pipe)
 	errs = pipep.ReadErrors(pipe)
 	if len(errs) == 0 {
 		t.Error("Expected test case to fail")

@@ -3,7 +3,6 @@ package file
 import (
 	"archive/zip"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path"
@@ -109,7 +108,6 @@ func zipFile(w *zip.Writer, relPath string, f *os.File) error {
 		return err
 	}
 
-	fmt.Println("zipped file", relPath)
 	return nil
 }
 
