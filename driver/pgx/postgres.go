@@ -582,7 +582,11 @@ func restoreTable(pipe chan interface{}, conn driver.CopyConn, schema string, o 
 	}
 	defer r.Close()
 	if err = conn.CopyFromReader(r, "COPY "+tableName+" FROM STDIN"); err != nil {
-		panic(tableName + ": " + err.Error())
+		// Ignore error if table doesn't exist
+		// relation "<table_name>" does not exist (SQLSTATE 42P01)
+		if strings.Contains(err.Error(), "42P01") {
+			return
+		}
 		pipe <- err
 		return
 	}
