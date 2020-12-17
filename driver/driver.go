@@ -79,10 +79,7 @@ type Scanner interface {
 // Driver is the interface type that needs to implemented by all drivers.
 type Driver interface {
 	// Creates and returns a connection
-	NewConn(url, searchPath string) (conn Conn, err error)
-
-	// SearchPath sets the search path and returns a func that reverts the change
-	SearchPath(conn Conn, newSearchPath string) (revert func() error, err error)
+	NewConn(url string) (conn Conn, err error)
 
 	// Ensure the version table exists
 	EnsureVersionTable(db Beginner, schema string) (err error)
@@ -113,7 +110,7 @@ type Driver interface {
 // DumpDriver interface
 type DumpDriver interface {
 	Driver
-	NewCopyConn(url, searchPath string) (conn CopyConn, err error)
+	NewCopyConn(url string) (conn CopyConn, err error)
 	Dump(conn CopyConn, dw file.DumpWriter, schema string, pipe chan interface{}, handleInterrupts func() chan os.Signal)
 	Restore(conn CopyConn, dr file.DumpReader, schema string, pipe chan interface{}, handleInterrupts func() chan os.Signal)
 	DeleteSchema(db Execer, schema string) error

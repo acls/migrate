@@ -32,10 +32,10 @@ func New(tableName string) driver.DumpDriver {
 	return d
 }
 
-func (d *pgDriver) NewConn(url, searchPath string) (driver.Conn, error) {
-	return d.NewCopyConn(url, searchPath)
+func (d *pgDriver) NewConn(url string) (driver.Conn, error) {
+	return d.NewCopyConn(url)
 }
-func (d *pgDriver) NewCopyConn(url, searchPath string) (driver.CopyConn, error) {
+func (d *pgDriver) NewCopyConn(url string) (driver.CopyConn, error) {
 	connConfig, err := pgx.ParseConnectionString(url)
 	if err != nil {
 		return nil, err
@@ -45,45 +45,7 @@ func (d *pgDriver) NewCopyConn(url, searchPath string) (driver.CopyConn, error) 
 		return nil, err
 	}
 	conn := Conn(c)
-	_, err = d.SearchPath(conn, searchPath)
-	return conn, err
-}
-
-// SearchPath sets and unsets the schema
-func (d *pgDriver) SearchPath(conn driver.Conn, newSearchPath string) (revert func() error, err error) {
-	// don't do nothin if the new search path is empty
-	if newSearchPath == "" {
-		revert = func() error { return nil }
-		return
-	}
-
-	// get search_path
-	var searchPath string
-	if err = conn.QueryRow("SHOW search_path").Scan(&searchPath); err != nil {
-		return
-	}
-
-	setSearchPath := func(verb, searchPath string) error {
-		// set search path
-		if err := conn.Exec("SET search_path TO " + searchPath); err != nil {
-			// close the connection since the state is unknown
-			conn.Close()
-			return err
-		}
-		return nil
-	}
-
-	// set/revert search_path
-	if searchPath != newSearchPath {
-		if err = setSearchPath("set", newSearchPath); err != nil {
-			return
-		}
-		revert = func() error { return setSearchPath("revert", searchPath) }
-	} else {
-		revert = func() error { return nil }
-	}
-
-	return
+	return conn, nil
 }
 
 func (d *pgDriver) EnsureVersionTable(db driver.Beginner, schema string) (err error) {

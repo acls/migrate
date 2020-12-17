@@ -10,8 +10,8 @@ import (
 var pgxURL = os.Getenv("POSTGRES_MIGRATE_TEST_URL") + "?sslmode=disable"
 
 // PgxURL string
-func PgxURL(schema string) string {
-	return pgxURL + "&search_path=" + schema
+func PgxURL() string {
+	return pgxURL
 }
 
 // MustInitPgx init pgx connection. Use a unique schema per module
@@ -34,7 +34,7 @@ func MustInitPgx(t *testing.T, schema string) *pgx.Conn {
 
 // PgxConn init pgx connection. Use a unique schema per module
 func PgxConn(schema string) (*pgx.Conn, error) {
-	config, err := pgx.ParseConnectionString(PgxURL(schema))
+	config, err := pgx.ParseConnectionString(PgxURL())
 	if err != nil {
 		return nil, err
 	}

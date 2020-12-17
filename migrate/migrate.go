@@ -36,12 +36,6 @@ type Migrator struct {
 }
 
 func (m *Migrator) init(conn driver.Conn, validate bool) (prevFiles, files file.MigrationFiles, err error) {
-	revert, err := m.Driver.SearchPath(conn, m.Schema)
-	if err != nil {
-		return
-	}
-	defer revert()
-
 	if err = m.Driver.EnsureVersionTable(conn, m.Schema); err != nil {
 		return
 	}
@@ -323,12 +317,6 @@ func (m *Migrator) migrateFiles(pipe chan interface{}, conn driver.Conn, prevFil
 		prevVersion file.Version
 	)
 
-	revert, err := m.Driver.SearchPath(conn, m.Schema)
-	if err != nil {
-		return err
-	}
-	defer revert()
-
 	commit := func() error {
 		// commit transaction
 		err := tx.Commit()
@@ -442,11 +430,6 @@ func (m *Migrator) handleInterrupts() chan os.Signal {
 }
 
 func (m *Migrator) Version(conn driver.Conn) (version file.Version, err error) {
-	revert, err := m.Driver.SearchPath(conn, m.Schema)
-	if err != nil {
-		return
-	}
-	defer revert()
 	return m.Driver.Version(conn)
 }
 
@@ -464,12 +447,6 @@ func (m *Migrator) Dump(pipe chan interface{}, conn driver.CopyConn, dw file.Dum
 	defer func() {
 		go pipep.Close(pipe, err)
 	}()
-
-	revert, err := m.Driver.SearchPath(conn, m.Schema)
-	if err != nil {
-		return
-	}
-	defer revert()
 
 	dd, ok := m.Driver.(driver.DumpDriver)
 	if !ok {
@@ -525,12 +502,6 @@ func (m *Migrator) Restore(pipe chan interface{}, conn driver.CopyConn, dr file.
 	if schema == "" {
 		schema = "public"
 	}
-
-	revert, err := dd.SearchPath(conn, schema)
-	if err != nil {
-		return
-	}
-	defer revert()
 
 	if m.Force {
 		if err = dd.DeleteSchema(conn, schema); err != nil {

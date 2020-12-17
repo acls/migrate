@@ -21,7 +21,7 @@ import (
 	"github.com/fatih/color"
 )
 
-const Version string = "2.1.1"
+const Version string = "2.1.2"
 
 func main() {
 	m := &migrate.Migrator{
@@ -72,7 +72,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	conn, err := m.Driver.NewConn(url, m.Schema)
+	conn, err := m.Driver.NewConn(url)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -120,7 +120,7 @@ func runDumpRestore(m *migrate.Migrator, url, dumpDir, command string) {
 		os.Exit(1)
 	}
 
-	conn, err := m.Driver.(driver.DumpDriver).NewCopyConn(url, m.Schema)
+	conn, err := m.Driver.(driver.DumpDriver).NewCopyConn(url)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
