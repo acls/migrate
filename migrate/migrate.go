@@ -31,12 +31,18 @@ type Migrator struct {
 	Interrupts bool
 	// Don't validate base upfiles
 	Force bool
-	// Schema to use, if set
+	// Schema to use
 	Schema string
+	// ExtraSchemas to put in search path
+	ExtraSchemas []string
+}
+
+func (m *Migrator) SearchPath() string {
+	return strings.Join(append([]string{m.Schema}, m.ExtraSchemas...), ",")
 }
 
 func (m *Migrator) init(conn driver.Conn, validate bool) (prevFiles, files file.MigrationFiles, err error) {
-	revert, err := m.Driver.SearchPath(conn, m.Schema)
+	revert, err := m.Driver.SearchPath(conn, m.SearchPath())
 	if err != nil {
 		return
 	}
@@ -323,7 +329,7 @@ func (m *Migrator) migrateFiles(pipe chan interface{}, conn driver.Conn, prevFil
 		prevVersion file.Version
 	)
 
-	revert, err := m.Driver.SearchPath(conn, m.Schema)
+	revert, err := m.Driver.SearchPath(conn, m.SearchPath())
 	if err != nil {
 		return err
 	}
@@ -442,7 +448,7 @@ func (m *Migrator) handleInterrupts() chan os.Signal {
 }
 
 func (m *Migrator) Version(conn driver.Conn) (version file.Version, err error) {
-	revert, err := m.Driver.SearchPath(conn, m.Schema)
+	revert, err := m.Driver.SearchPath(conn, m.SearchPath())
 	if err != nil {
 		return
 	}
@@ -465,7 +471,7 @@ func (m *Migrator) Dump(pipe chan interface{}, conn driver.CopyConn, dw file.Dum
 		go pipep.Close(pipe, err)
 	}()
 
-	revert, err := m.Driver.SearchPath(conn, m.Schema)
+	revert, err := m.Driver.SearchPath(conn, m.SearchPath())
 	if err != nil {
 		return
 	}

@@ -21,7 +21,7 @@ import (
 	"github.com/fatih/color"
 )
 
-const Version string = "2.1.1"
+const Version string = "2.2.0"
 
 func main() {
 	m := &migrate.Migrator{
