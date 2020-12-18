@@ -21,7 +21,7 @@ import (
 	"github.com/fatih/color"
 )
 
-const Version string = "2.1.2"
+const Version string = "2.1.3"
 
 func main() {
 	m := &migrate.Migrator{
@@ -59,7 +59,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	m.Driver = mpgx.New("")
+	m.Driver = mpgx.New(m.Schema, "")
 
 	if m.Path == "" {
 		m.Path, _ = os.Getwd()

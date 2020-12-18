@@ -16,25 +16,13 @@ type MigratableDatabase interface {
 	Pool() *pgx.ConnPool
 	Schema() string
 	Path() string
-	Migrate() (string, error)
+	Migrate() (schema string, fromVersion, toVersion file.Version, err error)
 	Dump(file.DumpWriter) error
 	Restore(file.DumpReader) error
 	Revert() error
 }
 
-// migrateSchemas migrates all the passed in migratable databases
-func migrateSchemas(migrators ...MigratableDatabase) error {
-	for _, m := range migrators {
-		if m == nil {
-			// skip nil migrators???
-			continue
-		}
-		if schema, err := m.Migrate(); err != nil {
-			return fmt.Errorf("Failed to migrate schema(%s): %s", schema, err)
-		}
-	}
-	return nil
-}
+var _ MigratableDatabase = &SchemaMigrator{}
 
 // SchemaMigrator struct
 type SchemaMigrator struct {
@@ -43,16 +31,21 @@ type SchemaMigrator struct {
 }
 
 // InitCopy makes a copy and initializes it
-func (m *SchemaMigrator) InitCopy(schemaSuffix string, d driver.DumpDriver, newPool func(string) *pgx.ConnPool, ensureSchema bool) SchemaMigrator {
+func (m *SchemaMigrator) InitCopy(schemaSuffix string, d driver.DumpDriver, newPool func(string) *pgx.ConnPool, ensureSchema bool, moreSchemas ...string) SchemaMigrator {
 	migrator := *m
-	// set migration driver
-	migrator.BaseMigrator.Driver = d
 	// append to schema
 	migrator.BaseMigrator.Schema += schemaSuffix
+	// set migration driver
+	migrator.BaseMigrator.Driver = d.Copy(migrator.BaseMigrator.Schema)
 	// get database connection for schema
-	migrator.ConnPool = newPool(migrator.BaseMigrator.Schema)
+	schemas := make([]string, 0, len(moreSchemas)+1)
+	schemas = append(schemas, migrator.Schema())
+	for _, schema := range moreSchemas {
+		schemas = append(schemas, schema+schemaSuffix)
+	}
+	migrator.ConnPool = newPool(strings.Join(schemas, ","))
 	if ensureSchema {
-		_, _ = migrator.ConnPool.Exec("CREATE SCHEMA IF NOT EXISTS " + migrator.BaseMigrator.Schema)
+		_, _ = migrator.ConnPool.Exec("CREATE SCHEMA IF NOT EXISTS " + migrator.Schema())
 	}
 	return migrator
 }
@@ -62,9 +55,9 @@ func (m *SchemaMigrator) Pool() *pgx.ConnPool {
 	return m.ConnPool
 }
 
-// Schema returns the base schema
+// Schema returns the driver schema
 func (m *SchemaMigrator) Schema() string {
-	return m.BaseMigrator.Schema
+	return m.BaseMigrator.Driver.Schema()
 }
 
 // Path returns the base path
@@ -107,6 +100,7 @@ func (m *SchemaMigrator) StartRestore() (migrator migrate.Migrator, schemas []st
 	}
 	// change schema to tmp
 	migrator.Schema = schemas[2]
+	migrator.Driver = migrator.Driver.Copy(migrator.Schema)
 	return
 }
 
@@ -129,6 +123,7 @@ func (m *SchemaMigrator) StartRevert() (migrator migrate.Migrator, schemas []str
 	}
 	// change schema to bak
 	migrator.Schema = schemas[2]
+	migrator.Driver = migrator.Driver.Copy(migrator.Schema)
 	return
 }
 
@@ -190,7 +185,7 @@ func (m *SchemaMigrator) Drop() error {
 
 	migrator, schemas := m.StartRestore()
 	// recreate tmp schema
-	_, err = m.Exec("DROP SCHEMA IF EXISTS " + migrator.Schema + " CASCADE; CREATE SCHEMA " + migrator.Schema + ";")
+	_, err = m.Exec("DROP SCHEMA IF EXISTS " + migrator.Driver.Schema() + " CASCADE; CREATE SCHEMA " + migrator.Driver.Schema() + ";")
 	if err != nil {
 		return err
 	}
@@ -216,7 +211,7 @@ func (m *SchemaMigrator) FinishRestore(migrator migrate.Migrator, schemas []stri
 }
 
 func migrateSchema(migrator *migrate.Migrator, dconn driver.Conn) (schema string, fromVersion, toVersion file.Version, err error) {
-	schema = migrator.Schema
+	schema = migrator.Driver.Schema()
 	fromVersion, toVersion, errs := migrator.MigrateBetweenSync(dconn)
 	err = oneError(fmt.Sprintf("Failed to migrate schema(%s)", schema), errs)
 	return

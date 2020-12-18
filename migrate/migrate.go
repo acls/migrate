@@ -31,12 +31,13 @@ type Migrator struct {
 	Interrupts bool
 	// Don't validate base upfiles
 	Force bool
-	// Schema to use, if set
+	// Schema to use
+	// Schema string
 	Schema string
 }
 
 func (m *Migrator) init(conn driver.Conn, validate bool) (prevFiles, files file.MigrationFiles, err error) {
-	if err = m.Driver.EnsureVersionTable(conn, m.Schema); err != nil {
+	if err = m.Driver.EnsureVersionTable(conn); err != nil {
 		return
 	}
 
@@ -474,7 +475,7 @@ func (m *Migrator) Dump(pipe chan interface{}, conn driver.CopyConn, dw file.Dum
 
 	// write table data
 	pipe1 := pipep.New()
-	go dd.Dump(conn, dw, m.Schema, pipe1, m.handleInterrupts)
+	go dd.Dump(conn, dw, pipe1, m.handleInterrupts)
 	if ok := pipep.WaitAndRedirect(pipe1, pipe, m.handleInterrupts()); !ok {
 		return
 	}
@@ -498,17 +499,12 @@ func (m *Migrator) Restore(pipe chan interface{}, conn driver.CopyConn, dr file.
 		return
 	}
 
-	schema := m.Schema
-	if schema == "" {
-		schema = "public"
-	}
-
 	if m.Force {
-		if err = dd.DeleteSchema(conn, schema); err != nil {
+		if err = dd.DeleteSchema(conn); err != nil {
 			return
 		}
 	}
-	if err = dd.EnsureVersionTable(conn, schema); err != nil {
+	if err = dd.EnsureVersionTable(conn); err != nil {
 		return
 	}
 
@@ -534,13 +530,13 @@ func (m *Migrator) Restore(pipe chan interface{}, conn driver.CopyConn, dr file.
 		}
 	}
 
-	if err = dd.TruncateTables(conn, schema); err != nil {
+	if err = dd.TruncateTables(conn); err != nil {
 		return
 	}
 
 	{ // restore data
 		pipe1 := pipep.New()
-		go dd.Restore(conn, dr, schema, pipe1, m.handleInterrupts)
+		go dd.Restore(conn, dr, pipe1, m.handleInterrupts)
 		if ok := pipep.WaitAndRedirect(pipe1, pipe, m.handleInterrupts()); !ok {
 			return
 		}

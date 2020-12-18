@@ -78,18 +78,28 @@ type Scanner interface {
 
 // Driver is the interface type that needs to implemented by all drivers.
 type Driver interface {
+	// Copy creates a popy of the driver
+	Copy(schema string) Driver
+
 	// Creates and returns a connection
 	NewConn(url string) (conn Conn, err error)
 
 	// Ensure the version table exists
-	EnsureVersionTable(db Beginner, schema string) (err error)
+	EnsureVersionTable(db Beginner) (err error)
 
 	// FilenameExtension returns the extension of the migration files.
 	// The returned string must not begin with a dot.
 	FilenameExtension() string
 
-	// TableName returns the table name used for storing schema migration versions.
-	TableName() string
+	// Schema returns the schema
+	Schema() string
+	// SetSchema sets the schema
+	SetSchema(string)
+	// Table returns the fully qualified table name used for storing schema migration versions.
+	Table() string
+
+	// TableName returns a fully qualified table name
+	TableName(tbl string) string
 
 	// Migrate is the heart of the driver.
 	// It will receive a file which the driver should apply
@@ -111,8 +121,8 @@ type Driver interface {
 type DumpDriver interface {
 	Driver
 	NewCopyConn(url string) (conn CopyConn, err error)
-	Dump(conn CopyConn, dw file.DumpWriter, schema string, pipe chan interface{}, handleInterrupts func() chan os.Signal)
-	Restore(conn CopyConn, dr file.DumpReader, schema string, pipe chan interface{}, handleInterrupts func() chan os.Signal)
-	DeleteSchema(db Execer, schema string) error
-	TruncateTables(db Conn, schema string) error
+	Dump(conn CopyConn, dw file.DumpWriter, pipe chan interface{}, handleInterrupts func() chan os.Signal)
+	Restore(conn CopyConn, dr file.DumpReader, pipe chan interface{}, handleInterrupts func() chan os.Signal)
+	DeleteSchema(db Execer) error
+	TruncateTables(db Conn) error
 }

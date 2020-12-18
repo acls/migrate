@@ -16,20 +16,26 @@ import (
 )
 
 type pgDriver struct {
+	schema    string
 	tableName string
 }
 
-const defaultTableName = "schema_migrations"
-
 // New creates a new postgresql driver
-func New(tableName string) driver.DumpDriver {
+func New(schema, tableName string) driver.DumpDriver {
 	d := &pgDriver{
 		tableName: tableName,
 	}
+	d.SetSchema(schema)
 	if d.tableName == "" {
-		d.tableName = defaultTableName
+		d.tableName = "schema_migrations"
 	}
 	return d
+}
+
+func (d *pgDriver) Copy(schema string) driver.Driver {
+	copy := *d
+	copy.SetSchema(schema)
+	return &copy
 }
 
 func (d *pgDriver) NewConn(url string) (driver.Conn, error) {
@@ -48,7 +54,7 @@ func (d *pgDriver) NewCopyConn(url string) (driver.CopyConn, error) {
 	return conn, nil
 }
 
-func (d *pgDriver) EnsureVersionTable(db driver.Beginner, schema string) (err error) {
+func (d *pgDriver) EnsureVersionTable(db driver.Beginner) (err error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -61,10 +67,8 @@ func (d *pgDriver) EnsureVersionTable(db driver.Beginner, schema string) (err er
 		err = tx.Commit()
 	}()
 
-	if schema != "" {
-		if err := d.EnsureSchema(tx, schema); err != nil {
-			return err
-		}
+	if err := d.EnsureSchema(tx); err != nil {
+		return err
 	}
 
 	versions := []func(driver.Databaser, string) error{
@@ -74,7 +78,7 @@ func (d *pgDriver) EnsureVersionTable(db driver.Beginner, schema string) (err er
 	if file.V2 {
 		versions = append(versions, ensureVersionTableV2)
 	}
-	tbl := d.tableName
+	tbl := d.Table()
 	for _, ensureVersion := range versions {
 		if err = ensureVersion(tx, tbl); err != nil {
 			return
@@ -171,8 +175,21 @@ func (d *pgDriver) FilenameExtension() string {
 	return "sql"
 }
 
-func (d *pgDriver) TableName() string {
-	return d.tableName
+func (d *pgDriver) Schema() string {
+	return d.schema
+}
+func (d *pgDriver) SetSchema(schema string) {
+	if schema == "" {
+		schema = "public"
+	}
+	d.schema = schema
+}
+func (d *pgDriver) Table() string {
+	return d.TableName(d.tableName)
+}
+
+func (d *pgDriver) TableName(tbl string) string {
+	return pgx.Identifier{d.schema, tbl}.Sanitize()
 }
 
 func (d *pgDriver) Migrate(db driver.Databaser, mf *file.Migration, pipe chan interface{}) {
@@ -219,12 +236,12 @@ func (d *pgDriver) migrateV1(db driver.Databaser, f *file.Migration, pipe chan i
 			pipe <- err
 			return false
 		}
-		if err := db.Exec("INSERT INTO "+d.tableName+" (version,up_file,down_file) VALUES ($1,$2,$3)", f.Minor(), up, down); err != nil {
+		if err := db.Exec("INSERT INTO "+d.Table()+" (version,up_file,down_file) VALUES ($1,$2,$3)", f.Minor(), up, down); err != nil {
 			pipe <- err
 			return false
 		}
 	} else {
-		if err := db.Exec("DELETE FROM "+d.tableName+" WHERE version=$1", f.Minor()); err != nil {
+		if err := db.Exec("DELETE FROM "+d.Table()+" WHERE version=$1", f.Minor()); err != nil {
 			pipe <- err
 			return false
 		}
@@ -254,13 +271,13 @@ func (d *pgDriver) migrateV2(db driver.Databaser, f *file.Migration, pipe chan i
 			return false
 		}
 		// foreign key ensures correct order
-		if err := db.Exec("INSERT INTO "+d.tableName+" (major,minor,prev_major,prev_minor,up_file,down_file) VALUES ($1,$2,$3,$4,$5,$6)",
+		if err := db.Exec("INSERT INTO "+d.Table()+" (major,minor,prev_major,prev_minor,up_file,down_file) VALUES ($1,$2,$3,$4,$5,$6)",
 			f.Major(), f.Minor(), prevVersion.Major(), prevVersion.Minor(), up, down); err != nil {
 			pipe <- err
 			return false
 		}
 	} else {
-		if err := db.Exec("DELETE FROM "+d.tableName+" WHERE major=$1 AND minor=$2", f.Major(), f.Minor()); err != nil {
+		if err := db.Exec("DELETE FROM "+d.Table()+" WHERE major=$1 AND minor=$2", f.Major(), f.Minor()); err != nil {
 			pipe <- err
 			return false
 		}
@@ -282,13 +299,13 @@ func (d *pgDriver) Version(db driver.RowQueryer) (version file.Version, err erro
 
 func (d *pgDriver) versionV1(db driver.RowQueryer) (file.Version, error) {
 	var version uint64
-	err := db.QueryRow("SELECT version FROM " + d.tableName + " ORDER BY version DESC LIMIT 1").Scan(&version)
+	err := db.QueryRow("SELECT version FROM " + d.Table() + " ORDER BY version DESC LIMIT 1").Scan(&version)
 	return file.NewVersion2(0, version), err
 }
 
 func (d *pgDriver) versionV2(db driver.RowQueryer) (file.Version, error) {
 	var major, minor uint64
-	err := db.QueryRow("SELECT major, minor FROM "+d.tableName+" ORDER BY major DESC, minor DESC LIMIT 1").Scan(&major, &minor)
+	err := db.QueryRow("SELECT major, minor FROM "+d.Table()+" ORDER BY major DESC, minor DESC LIMIT 1").Scan(&major, &minor)
 	return file.NewVersion2(major, minor), err
 }
 
@@ -300,7 +317,7 @@ func (d *pgDriver) GetMigrationFiles(db driver.Databaser) (files file.MigrationF
 		columns = "major, minor"
 		order = columns
 	}
-	rows, err := db.Query("SELECT " + columns + " FROM " + d.tableName + " ORDER BY " + order)
+	rows, err := db.Query("SELECT " + columns + " FROM " + d.Table() + " ORDER BY " + order)
 	if err != nil {
 		return
 	}
@@ -350,7 +367,7 @@ func (d *pgDriver) readVersionContent(db driver.Databaser, version file.Version,
 	d.GetMigrationFiles(db)
 	// get content
 	var txt string
-	qry := "SELECT " + column + " FROM " + d.tableName + " WHERE " + where
+	qry := "SELECT " + column + " FROM " + d.Table() + " WHERE " + where
 	err := db.QueryRow(qry, version.Major(), version.Minor()).Scan(&txt)
 	if err != nil {
 		panic(err)
@@ -384,20 +401,16 @@ func (d *pgDriver) UpdateFiles(db driver.Databaser, f *file.Migration, pipe chan
 	if file.V2 {
 		where = "major = $1 AND minor = $2"
 	}
-	if err := db.Exec("UPDATE "+d.tableName+" SET up_file=$3, down_file=$4 WHERE "+where, f.Major(), f.Minor(), up, down); err != nil {
+	if err := db.Exec("UPDATE "+d.Table()+" SET up_file=$3, down_file=$4 WHERE "+where, f.Major(), f.Minor(), up, down); err != nil {
 		pipe <- err
 	}
 	return
 }
 
-func (d *pgDriver) Dump(conn driver.CopyConn, dw file.DumpWriter, schema string, pipe chan interface{}, handleInterrupts func() chan os.Signal) {
+func (d *pgDriver) Dump(conn driver.CopyConn, dw file.DumpWriter, pipe chan interface{}, handleInterrupts func() chan os.Signal) {
 	defer close(pipe)
 
-	if schema == "" {
-		schema = "public"
-	}
-
-	tbls, err := d.getTables(conn, schema)
+	tbls, err := d.getTables(conn)
 	if err != nil {
 		pipe <- err
 		return
@@ -405,20 +418,20 @@ func (d *pgDriver) Dump(conn driver.CopyConn, dw file.DumpWriter, schema string,
 
 	for _, tbl := range tbls {
 		pipe1 := pipep.New()
-		go dumpTable(pipe1, conn, dw, schema, tbl)
+		go dumpTable(pipe1, conn, dw, d.TableName(tbl))
 		if ok := pipep.WaitAndRedirect(pipe1, pipe, handleInterrupts()); !ok {
 			return
 		}
 	}
 }
-func (d *pgDriver) getTables(conn driver.Queryer, schema string) (tbls []string, err error) {
+func (d *pgDriver) getTables(conn driver.Queryer) (tbls []string, err error) {
 	rows, err := conn.Query(`SELECT
 			table_name
 		FROM information_schema.tables
 		WHERE
 			table_schema = $1
 			AND table_name != $2`,
-		schema,
+		d.schema,
 		d.tableName,
 	)
 	defer rows.Close()
@@ -432,11 +445,10 @@ func (d *pgDriver) getTables(conn driver.Queryer, schema string) (tbls []string,
 	}
 	return
 }
-func dumpTable(pipe chan interface{}, conn driver.CopyConn, dw file.DumpWriter, schema, tbl string) {
+func dumpTable(pipe chan interface{}, conn driver.CopyConn, dw file.DumpWriter, tbl string) {
 	defer close(pipe)
 
-	tableName := pgx.Identifier{schema, tbl}.Sanitize()
-	pipe <- tableName
+	pipe <- tbl
 
 	// open a writer
 	w, err := dw.Writer(file.TablesDir, tbl)
@@ -446,7 +458,7 @@ func dumpTable(pipe chan interface{}, conn driver.CopyConn, dw file.DumpWriter, 
 	defer w.Close()
 	// dump table
 	time.Sleep(1 * time.Nanosecond)
-	err = conn.CopyToWriter(w, "COPY "+tableName+" TO STDOUT")
+	err = conn.CopyToWriter(w, "COPY "+tbl+" TO STDOUT")
 	if err != nil {
 		pipe <- err
 		return
@@ -454,34 +466,30 @@ func dumpTable(pipe chan interface{}, conn driver.CopyConn, dw file.DumpWriter, 
 }
 
 // DeleteSchema drop the schema, if it exists
-func (d *pgDriver) DeleteSchema(db driver.Execer, schema string) error {
-	return db.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+func (d *pgDriver) DeleteSchema(db driver.Execer) error {
+	return db.Exec("DROP SCHEMA IF EXISTS " + d.schema + " CASCADE")
 }
 
 // EnsureSchema creates the schema
-func (d *pgDriver) EnsureSchema(db driver.Execer, schema string) error {
-	return db.Exec("CREATE SCHEMA IF NOT EXISTS " + schema)
+func (d *pgDriver) EnsureSchema(db driver.Execer) error {
+	return db.Exec("CREATE SCHEMA IF NOT EXISTS " + d.schema)
 }
 
 // TruncateTables truncates all tables in schema except for the schema migrations table
-func (d *pgDriver) TruncateTables(db driver.Conn, schema string) (err error) {
-	if schema == "" {
-		schema = "public"
-	}
-
-	tbls, err := d.getTables(db, schema)
+func (d *pgDriver) TruncateTables(db driver.Conn) (err error) {
+	tbls, err := d.getTables(db)
 	if err != nil {
 		return
 	}
 	if len(tbls) == 0 {
-		return fmt.Errorf("No tables to truncate in schema '%s'", schema)
+		return fmt.Errorf("No tables to truncate in schema '%s'", d.schema)
 	}
 
 	var cmds []string
 	const cmdFmt = "TRUNCATE TABLE %s CASCADE;"
 	// const cmdFmt = "TRUNCATE TABLE %s;"
 	for _, tbl := range tbls {
-		cmds = append(cmds, fmt.Sprintf(cmdFmt, pgx.Identifier{schema, tbl}.Sanitize()))
+		cmds = append(cmds, fmt.Sprintf(cmdFmt, d.TableName(tbl)))
 	}
 	cmd := strings.Join(cmds, "")
 	// tx, err := db.Begin()
@@ -499,7 +507,7 @@ func (d *pgDriver) TruncateTables(db driver.Conn, schema string) (err error) {
 	return db.Exec(cmd)
 }
 
-func (d *pgDriver) Restore(conn driver.CopyConn, dr file.DumpReader, schema string, pipe chan interface{}, handleInterrupts func() chan os.Signal) {
+func (d *pgDriver) Restore(conn driver.CopyConn, dr file.DumpReader, pipe chan interface{}, handleInterrupts func() chan os.Signal) {
 	defer close(pipe)
 
 	tableFiles, err := dr.Files(file.TablesDir)
@@ -520,22 +528,21 @@ func (d *pgDriver) Restore(conn driver.CopyConn, dr file.DumpReader, schema stri
 	for _, o := range tableFiles {
 		interrupts := handleInterrupts()
 		if interrupts == nil {
-			restoreTable(pipe, conn, schema, o)
+			restoreTable(pipe, conn, d.TableName(o.Name), o)
 			continue
 		}
 		pipe1 := pipep.New()
 		go func() {
 			defer close(pipe1)
-			restoreTable(pipe1, conn, schema, o)
+			restoreTable(pipe1, conn, d.TableName(o.Name), o)
 		}()
 		if ok := pipep.WaitAndRedirect(pipe1, pipe, interrupts); !ok {
 			return
 		}
 	}
 }
-func restoreTable(pipe chan interface{}, conn driver.CopyConn, schema string, o file.Opener) {
-	tableName := pgx.Identifier{schema, o.Name}.Sanitize()
-	pipe <- tableName
+func restoreTable(pipe chan interface{}, conn driver.CopyConn, tbl string, o file.Opener) {
+	pipe <- tbl
 
 	r, err := o.Open()
 	if err != nil {
@@ -543,7 +550,7 @@ func restoreTable(pipe chan interface{}, conn driver.CopyConn, schema string, o 
 		return
 	}
 	defer r.Close()
-	if err = conn.CopyFromReader(r, "COPY "+tableName+" FROM STDIN"); err != nil {
+	if err = conn.CopyFromReader(r, "COPY "+tbl+" FROM STDIN"); err != nil {
 		// Ignore error if table doesn't exist
 		// relation "<table_name>" does not exist (SQLSTATE 42P01)
 		if strings.Contains(err.Error(), "42P01") {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"testing"
+
 	// Ensure imports for each driver we wish to test
 
 	"github.com/acls/migrate/driver"
@@ -22,9 +23,9 @@ var schema = "migrate_migrate"
 
 func NewMigratorAndConn(t *testing.T, tmpdir string) (*Migrator, driver.Conn, func()) {
 	m := &Migrator{
-		Driver: mpgx.New(""),
+		Driver: mpgx.New(schema, ""),
 		Path:   tmpdir,
-		Schema: schema,
+		// Schema: schema,
 	}
 	return m, mpgx.Conn(testutil.MustInitPgx(t, schema)), func() {
 		// cleanup
@@ -327,7 +328,7 @@ func TestDumpRestore(t *testing.T) {
 	}
 
 	assertRowCount := func(tbl string, mustSucceed bool, expect int) {
-		tbl = pgx.Identifier{m.Schema, tbl}.Sanitize()
+		tbl = pgx.Identifier{m.Driver.Schema(), tbl}.Sanitize()
 		var count int
 		if err := conn.QueryRow("SELECT COUNT(*) FROM " + tbl).Scan(&count); err != nil {
 			if !mustSucceed {
@@ -401,8 +402,9 @@ func TestDumpRestore(t *testing.T) {
 
 	// Restore to a different schema
 	m.Schema += "2"
+	m.Driver.SetSchema(m.Schema)
 	// ensure the schema doesn't exist
-	err = m.Driver.(driver.DumpDriver).DeleteSchema(conn, m.Schema)
+	err = m.Driver.(driver.DumpDriver).DeleteSchema(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,6 +424,7 @@ func TestDumpRestore(t *testing.T) {
 
 	// Restore to the same schema should fail
 	m.Schema = schema
+	m.Driver.SetSchema(m.Schema)
 	errs = m.RestoreSync(conn.(driver.CopyConn), &file.DirReader{BaseDir: dumpDir})
 	if len(errs) == 0 {
 		t.Fatal("Expected an error")

@@ -19,8 +19,8 @@ func TestMigrate(t *testing.T) {
 	conn := Conn(testutil.MustInitPgx(t, schema))
 	defer conn.Close()
 
-	d := New("")
-	if err := d.EnsureVersionTable(conn, schema); err != nil {
+	d := New(schema, "")
+	if err := d.EnsureVersionTable(conn); err != nil {
 		t.Fatal(err)
 	}
 
