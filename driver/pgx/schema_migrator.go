@@ -57,6 +57,7 @@ func (m *SchemaMigrator) InitCopy(schemaSuffix string, d driver.DumpDriver, newP
 	for _, schema := range migrator.BaseMigrator.ExtraSchemas {
 		schemas = append(schemas, schema+schemaSuffix)
 	}
+	migrator.BaseMigrator.ExtraSchemas = schemas[1:]
 	migrator.ConnPool = newPool(strings.Join(schemas, ","))
 	if ensureSchema {
 		_, _ = migrator.ConnPool.Exec("CREATE SCHEMA IF NOT EXISTS " + migrator.BaseMigrator.Schema)
